@@ -1,0 +1,20 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Runtime/state folders (local only)
+workspace/
+workspace-runs/
+.tmp-test-workspaces/
+
+# Local secrets and runtime artifacts (project-agnostic)
+**/memory/ssh_runtime.env
+**/memory/ssh_blocker.md
+**/memory/preflight_result.txt
+**/memory/windows_supervisor.log
+**/memory/evidence/
