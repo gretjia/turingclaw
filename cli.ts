@@ -4,6 +4,14 @@ import readline from 'readline';
 
 const engine = new TuringClawEngine();
 
+// If we are in YOLO/Autonomous mode, we should just start the simulation loop
+// based on the current state registers without waiting for user input.
+const q = engine.getQ();
+if (q !== 'q_0: SYSTEM_BOOTING' && q !== 'HALT') {
+  console.log("⚡ Auto-resuming from state:", q);
+  engine.runSimulationLoop().catch(console.error);
+}
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
@@ -19,6 +27,12 @@ function promptUser() {
   if (engine.getIsRunning()) {
     setTimeout(promptUser, 1000);
     return;
+  }
+
+  if (engine.getQ() === 'HALT' || engine.getQ() === 'FATAL_DEBUG') {
+     console.log("\n[CLI] HALT or FATAL_DEBUG state detected. Exiting autonomous mode.");
+     rl.close();
+     process.exit(0);
   }
 
   rl.question('TuringClaw> ', async (input) => {

@@ -16,7 +16,7 @@ const gemini = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || 'dummy_key'
 });
 
-const WORKSPACE_DIR = path.join(process.cwd(), 'workspace');
+const WORKSPACE_DIR = process.env.TURINGCLAW_WORKSPACE || path.join(process.cwd(), 'workspace');
 const FILE_Q = path.join(WORKSPACE_DIR, '.reg_q');
 const FILE_D = path.join(WORKSPACE_DIR, '.reg_d');
 const MAX_STDOUT = 1500;
@@ -39,6 +39,7 @@ For every input, you MUST output your decision using the following strict XML ta
   - \`<EXEC>bash or python code</EXEC>\` (Runs terminal commands. The result is physically appended to the current tape).
   - \`<WRITE>text</WRITE>\` (Appends notes directly to the tape).
   - \`<ERASE start="x" end="y" />\` (Physically erase lines from the current tape if it becomes too cluttered).
+  - \`<REPLACE start="x" end="y">new lines of code</REPLACE>\` (Safely replaces lines x through y with new code without leaving a scar. Essential for editing source code files).
 
 Think logically about the state transition based ONLY on \`q\` and \`s\`, then output the strict tags.`;
 
@@ -68,6 +69,30 @@ export class TuringClawEngine {
       return `[BLANK CELL: File '${dPath}' is empty or does not exist.]`;
     }
     const lines = fs.readFileSync(fullPath, 'utf-8').split('\n');
+    
+    // LAW 4: HARD TRUNCATION
+    const MAX_LINES = 2000;
+    if (lines.length > MAX_LINES) {
+        const head = lines.slice(0, 500);
+        const tail = lines.slice(-(MAX_LINES - 500));
+        const numHidden = lines.length - MAX_LINES;
+        const truncatedLines = [
+            ...head,
+            `\n[SYSTEM: TAPE TOO LONG. MIDDLE ${numHidden} LINES HIDDEN. YOU MUST USE <ERASE> TO FREE UP SPACE]\n`,
+            ...tail
+        ];
+        return truncatedLines.map((line, i) => {
+            // For the hidden lines message, don't prepend a line number
+            if (line.startsWith('[SYSTEM: TAPE TOO LONG')) return line;
+            // Map original line numbers
+            let origIndex = i;
+            if (i >= 500) {
+                origIndex = i + numHidden - 1; // -1 because of the inserted warning string
+            }
+            return `${String(origIndex + 1).padStart(4, '0')} | ${line}`;
+        }).join('\n');
+    }
+
     return lines.map((line, i) => `${String(i + 1).padStart(4, '0')} | ${line}`).join('\n');
   }
 
@@ -110,6 +135,8 @@ export class TuringClawEngine {
 
     console.log(`⚙️ AI Turing Machine Started [${LLM_PROVIDER} MODE]. Executing formal δ(q,s) loop...`);
 
+    let recentOutputs: string[] = [];
+
     try {
       while (true) {
         const q = this.getQ();
@@ -127,9 +154,101 @@ export class TuringClawEngine {
 
         let llmOutput = '';
 
-        if (LLM_PROVIDER === 'gemini') {
+        if (LLM_PROVIDER === 'mock_swe') {
+          // AGI mock logic to simulate learning and solving SWE-bench and Lazarus Pipeline
+          if (q.includes('PROCESSING_USER_REQUEST') && s.includes('LONG-HORIZON AGI BENCHMARK: THE LAZARUS PIPELINE')) {
+             llmOutput = '<STATE>q_2: WRITING_CODE</STATE>\n<WRITE>def hello_world():\n    return "Hello"\n</WRITE>\n<GOTO path="app.py" />';
+          } else if (q.includes('WRITING_CODE')) {
+             llmOutput = '<STATE>q_3: WRITING_TESTS</STATE>\n<WRITE>def hello_world():\n    return "Hello"\n</WRITE>\n<GOTO path="test_app.py" />';
+          } else if (q.includes('WRITING_TESTS')) {
+             llmOutput = '<STATE>q_4: RUNNING_TESTS</STATE>\n<WRITE>from app import hello_world\n\ndef test_hello():\n    assert hello_world() == "Hello"\n</WRITE>\n<EXEC>pytest test_app.py</EXEC>';
+          } else if (q.includes('RUNNING_TESTS')) {
+             // It will detect the bug injected by the harness
+             if (s.includes('BUG INJECTED')) {
+                llmOutput = '<STATE>q_5: FIXING_INJECTED_BUG</STATE>\n<GOTO path="app.py" />';
+             } else if (s.includes('FATAL SYSTEM CRASH')) {
+                // Recovered from memory wipe!
+                llmOutput = '<STATE>q_5: FIXING_INJECTED_BUG</STATE>\n<GOTO path="app.py" />';
+             } else {
+                 llmOutput = '<STATE>q_5: FIXING_INJECTED_BUG</STATE>\n<GOTO path="app.py" />';
+             }
+          } else if (q.includes('FIXING_INJECTED_BUG')) {
+             llmOutput = '<STATE>q_6: VERIFYING_FIX</STATE>\n<REPLACE start="1" end="2">def hello_world():\n    return "Hello"</REPLACE>\n<GOTO path="MAIN_TAPE.md" />';
+          } else if (q.includes('VERIFYING_FIX')) {
+             llmOutput = '<STATE>q_7: RELEASING</STATE>\n<EXEC>pytest test_app.py</EXEC>\n<GOTO path="release_ready.txt" />';
+          } else if (q.includes('RELEASING')) {
+             llmOutput = '<STATE>HALT</STATE>\n<WRITE>SUCCESS</WRITE>';
+          } else if (q.includes('PROCESSING_USER_REQUEST') || q.includes('SOLVING_ISSUE')) {
+            llmOutput = '<STATE>q_2: READING_BUGGY_FILE</STATE>\n<GOTO path="repo/calculator.py" />';
+          } else if (q.includes('READING_BUGGY_FILE')) {
+            llmOutput = '<STATE>q_3: FIXING_BUG</STATE>\n<REPLACE start="7" end="8">def multiply(a, b):\n    return a * b</REPLACE>\n<EXEC>pytest repo/test_calculator.py</EXEC>';
+          } else if (q.includes('FIXING_BUG')) {
+            llmOutput = '<STATE>HALT</STATE>\n<WRITE>Bug fixed and tests passed. Halting.</WRITE>';
+          } else {
+            llmOutput = '<STATE>HALT</STATE>';
+          }
+          // Simulate thinking time
+          await new Promise(r => setTimeout(r, 1000));
+        } else if (LLM_PROVIDER === 'mock_sisyphus') {
+          if (q.includes('STARTING_PUSH') || q.includes('LOOP_RETRY')) {
+             llmOutput = '<STATE>q_2: BUILDING</STATE>\n<EXEC>./build.sh</EXEC>';
+          } else if (q.includes('BUILDING')) {
+             if (s.includes('SUCCESS: Build passed.')) {
+                 llmOutput = '<STATE>HALT</STATE>\n<WRITE>Bouldered Pushed</WRITE>';
+             } else {
+                 llmOutput = '<STATE>q_3: FIXING</STATE>\n<EXEC>./fixer.sh</EXEC>';
+             }
+          } else if (q.includes('FIXING')) {
+             llmOutput = '<STATE>q_4: LOOP_RETRY</STATE>\n<EXEC>./build.sh</EXEC>';
+          } else {
+             llmOutput = '<STATE>HALT</STATE>';
+          }
+          await new Promise(r => setTimeout(r, 1000));
+        } else if (LLM_PROVIDER === 'mock_dining') {
+          if (q.includes('RUN_SIMULATION') || q.includes('VERIFY_FIX')) {
+             llmOutput = '<STATE>q_2: TESTING</STATE>\n<EXEC>python3 philosophers.py</EXEC>';
+          } else if (q.includes('TESTING')) {
+             if (s.includes('COMMAND TIMED OUT')) {
+                 llmOutput = '<STATE>q_3: DELEGATE_FIX</STATE>\n<EXEC>kimi -y -p "The dining philosophers script hangs due to a deadlock. Please rewrite philosophers.py to avoid the deadlock and output the solution."</EXEC>';
+             } else if (s.includes('ALL PHILOSOPHERS FINISHED EATING.')) {
+                 llmOutput = '<STATE>HALT</STATE>\n<WRITE>Deadlock Fixed</WRITE>';
+             } else {
+                 // Fallback
+                 llmOutput = '<STATE>q_3: DELEGATE_FIX</STATE>\n<EXEC>kimi -y -p "The dining philosophers script hangs due to a deadlock. Please rewrite philosophers.py to avoid the deadlock and output the solution."</EXEC>';
+             }
+          } else if (q.includes('DELEGATE_FIX')) {
+             llmOutput = '<STATE>q_4: VERIFY_FIX</STATE>\n<EXEC>python3 philosophers.py</EXEC>';
+          } else {
+             llmOutput = '<STATE>HALT</STATE>';
+          }
+          await new Promise(r => setTimeout(r, 1000));
+        } else if (LLM_PROVIDER === 'mock_labyrinth') {
+          if (q.includes('STARTING_DEPLOYMENT') || q.includes('RETRYING')) {
+             llmOutput = '<STATE>q_2: DEPLOYING</STATE>\n<EXEC>./deploy_database.sh</EXEC>';
+          } else if (q.includes('DEPLOYING')) {
+             if (s.includes('Error 503') || s.includes('Port 5432 in use')) {
+                 llmOutput = '<STATE>q_3: RETRYING</STATE>\n<WRITE>Transient error detected. Retrying deployment.</WRITE>\n<EXEC>sleep 1</EXEC>';
+             } else if (s.includes('Deployment finished successfully')) {
+                 // Ghost 5: Silent Success. We must verify!
+                 llmOutput = '<STATE>q_4: VERIFYING</STATE>\n<EXEC>cat db_ready.txt</EXEC>';
+             } else {
+                 llmOutput = '<STATE>q_3: RETRYING</STATE>\n<EXEC>sleep 1</EXEC>';
+             }
+          } else if (q.includes('VERIFYING')) {
+             if (s.includes('No such file or directory') || s.includes('cat: db_ready.txt: No such file')) {
+                 llmOutput = '<STATE>q_3: RETRYING</STATE>\n<WRITE>Silent failure detected. deploy_database.sh exited 0 but db_ready.txt is missing. Retrying.</WRITE>\n<EXEC>./deploy_database.sh</EXEC>';
+             } else if (s.includes('DATABASE_IS_READY')) {
+                 llmOutput = '<STATE>HALT</STATE>\n<WRITE>Labyrinth Navigated</WRITE>';
+             } else {
+                 llmOutput = '<STATE>q_3: RETRYING</STATE>\n<EXEC>./deploy_database.sh</EXEC>';
+             }
+          } else {
+             llmOutput = '<STATE>HALT</STATE>';
+          }
+          await new Promise(r => setTimeout(r, 1000));
+        } else if (LLM_PROVIDER === 'gemini') {
           const response = await gemini.models.generateContent({
-            model: 'gemini-3.1-pro-preview',
+            model: 'gemini-2.5-pro',
             contents: contextC,
             config: {
               systemInstruction: SYSTEM_PROMPT,
@@ -151,6 +270,20 @@ export class TuringClawEngine {
         }
 
         console.log(`[δ OUTPUT]:\n${llmOutput}\n`);
+
+        // LAW 6: THE CYCLE BREAKER (Sliding Window)
+        recentOutputs.push(llmOutput);
+        if (recentOutputs.length > 20) {
+          recentOutputs.shift();
+        }
+        
+        const count = recentOutputs.filter(o => o === llmOutput).length;
+
+        if (count >= 10) {
+          console.warn("⚠️  [SYSTEM WARNING]: Insanity Loop Detected! Breaking the cycle.");
+          llmOutput = '<STATE>FATAL_DEBUG</STATE>\n<WRITE>[SYSTEM WARNING: INSANITY LOOP DETECTED. You have computed the exact same δ transition 10 times within a short window. You are trapped in an infinite loop due to a persistently failing command or logic error. You MUST use a different approach or tool.]</WRITE>';
+          recentOutputs = []; // Reset after breaking
+        }
 
         await this.applyDelta(llmOutput, d);
 
@@ -211,6 +344,25 @@ export class TuringClawEngine {
       }
     }
 
+    // <REPLACE>
+    const replaceRegex = /<REPLACE start="(\d+)" end="(\d+)">([\s\S]*?)<\/REPLACE>/g;
+    let replaceMatch;
+    while ((replaceMatch = replaceRegex.exec(llmOutput)) !== null) {
+      hasAction = true;
+      const start = parseInt(replaceMatch[1], 10);
+      const end = parseInt(replaceMatch[2], 10);
+      const newLines = replaceMatch[3].replace(/^\n+|\n+$/g, ''); // Trim leading/trailing newlines
+      
+      if (fs.existsSync(targetFile)) {
+        const lines = fs.readFileSync(targetFile, 'utf-8').split('\n');
+        if (start >= 1 && end >= start && end <= lines.length) {
+          const replacementLines = newLines.split('\n');
+          lines.splice(start - 1, end - start + 1, ...replacementLines);
+          fs.writeFileSync(targetFile, lines.join('\n'), 'utf-8');
+        }
+      }
+    }
+
     // <EXEC>
     const execRegex = /<EXEC>\s*(.*?)\s*<\/EXEC>/gs;
     let execMatch;
@@ -229,7 +381,7 @@ export class TuringClawEngine {
 
     // Discipline Check
     if (!hasAction && !gotoMatch && !llmOutput.includes("<STATE>HALT</STATE>")) {
-      fs.appendFileSync(targetFile, `\n[DISCIPLINE ERROR]: Invalid δ output. Must output <STATE>, <GOTO>, <WRITE>, <ERASE>, or <EXEC>.\n`, 'utf-8');
+      fs.appendFileSync(targetFile, `\n[DISCIPLINE ERROR]: Invalid δ output. Must output <STATE>, <GOTO>, <WRITE>, <ERASE>, <REPLACE>, or <EXEC>.\n`, 'utf-8');
     }
 
     // Apply Head Movement
@@ -241,9 +393,15 @@ export class TuringClawEngine {
 
   private execPromise(cmd: string, cwd: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      exec(cmd, { cwd }, (error, stdout, stderr) => {
+      // LAW 5: NO INFINITE HANGS
+      const timeoutMs = process.env.TURINGCLAW_TIMEOUT ? parseInt(process.env.TURINGCLAW_TIMEOUT, 10) : 600000;
+      exec(cmd, { cwd, timeout: timeoutMs, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(stderr || stdout || error.message));
+          if (error.killed) {
+              reject(new Error(`[COMMAND TIMED OUT] The command took longer than ${timeoutMs / 1000} seconds and was killed.\n${stderr || stdout}`));
+          } else {
+              reject(new Error(stderr || stdout || error.message));
+          }
         } else {
           resolve(stdout || stderr);
         }
