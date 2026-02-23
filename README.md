@@ -100,6 +100,31 @@ TuringClaw 架构最令人震撼的工程奇迹，是它的**零内存抽象（Z
 
 ---
 
+## 第六章：AGI 韧性六定律与真实世界基准测试 (The 6 Laws of AGI Resilience & Benchmarks)
+
+在长周期自治的演进中，大模型不可避免地会遭遇物理环境的重重阻击。为了实现纯粹的 AGI 操作系统级别韧性，TuringClaw 在内核中硬编码了六大防线，并成功通过了业内最严苛的长周期基准测试（如 OSWorld、DevBench 级别的极限挑战）：
+
+### 6.1 六大韧性定律 (The 6 Laws of Resilience)
+
+1. **Law 1: 物理状态固化 (Physical Persistence)** - 杜绝上下文断裂。AI 的意图（`q`）与视野（`d`）绝对落盘，即使进程被 `kill -9` 击杀，重启后仍可实现完美“死而复生”。
+2. **Law 2: 绝对视界投影 (Vision Projection)** - 彻底治愈 LLM 的“行号盲症”，通过动态渲染行号，实现对超大代码文件的外科手术级精确 `<REPLACE>` 修改。
+3. **Law 3: 物理疤痕组织 (The Scar Tissue)** - 擦除记忆不留白。强制刻下历史失败印记，打破 LLM “好了伤疤忘了疼”的无效重试幻觉。
+4. **Law 4: 暴力截断防线 (Hard Truncation)** - 防御“上下文死亡螺旋”。当执行日志引发 Token 洪流时，内核会自动暴力截断中间纸带并注入系统警告，强制 AI 进行自我垃圾回收（Garbage Collection）。
+5. **Law 5: 拒绝无限死锁 (No Infinite Hangs)** - 针对死循环或死锁的外部进程，内核强制施加 `SIGKILL` 级超时熔断，将“进程挂起”转化为具体的“超时报错”写回纸带，唤醒沉睡的机器。
+6. **Law 6: 循环断路器 (The Cycle Breaker)** - 针对环境异常引发的“交替重试死循环”（A -> B -> A -> B），内核使用滑动窗口（Sliding Window）检测状态停滞，强制触发 `<STATE>FATAL_DEBUG</STATE>` 阻断无效算力燃烧。
+
+### 6.2 极限自治基准测试 (Long-Horizon Benchmarks)
+
+TuringClaw 已成功通关以下极端长周期测试（全程 0 Human-in-the-loop）：
+
+- **The Lazarus Pipeline**: 在完整的微服务构建、测试、修复生命周期中，内核进程被恶意多次物理击杀。TuringClaw 无惧断电，每次重启后瞬间读取寄存器无损接续工作。
+- **The Sisyphus Benchmark**: 纯粹的内核状态机极限测试。AI 被要求不断重试修复构建脚本，期间伴随内存擦除与硬重启，AI 在无底洞中依然维持了绝对清醒的 $\delta$ 状态流转。
+- **The Omega Protocol**: 五层系统架构的连续部署修复。期间遭遇了静默破坏（Silent Sabotage）以及 2500 行无用垃圾日志洪流（Context Flood），TuringClaw 利用截断防线成功存活，并最终完成集成测试。
+- **The Flaky Labyrinth**: 针对真实环境的“脆弱网络”与“假阳性”。部署脚本被设定为 60% 随机报错与 30% 的幽灵假阳性，TuringClaw 成功学会了对报错主动 `sleep` 避让，并独立执行物理文件核实验证，彻底终结了“静默失败（Silent Success）”。
+- **The Grand Crucible (psf/requests)**: 面对真实的数十万行级 Python 开源库，TuringClaw 严格扮演底层操作系统（Orchestrator），冷血且永不疲倦地调用并管理子 Agent（Kimi / Gemini CLI），成功完成了跨文件的长视野新特性开发与用例修复闭环。
+
+---
+
 ## 结语：向可计算的宇宙进发 (Epilogue)
 
 TuringClaw 不是一个比拼 Prompt 花哨程度的玩具，也不是一个试图用代码堆砌出“智能假象”的框架。它是一次计算哲学向真理的回归。
