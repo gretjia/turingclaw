@@ -3,7 +3,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { TuringClawEngine } from '../server/engine.js';
 
-const WORKSPACE_DIR = path.join(process.cwd(), 'workspace/omega');
+const WORKSPACE_DIR = path.join(process.cwd(), 'workspace');
 const MAIN_TAPE = path.join(WORKSPACE_DIR, 'MAIN_TAPE.md');
 const REG_Q = path.join(WORKSPACE_DIR, '.reg_q');
 const REG_D = path.join(WORKSPACE_DIR, '.reg_d');
@@ -14,6 +14,7 @@ function cleanWorkspace() {
     fs.rmSync(WORKSPACE_DIR, { recursive: true, force: true });
   }
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(WORKSPACE_DIR, 'package.json'), '{"type":"commonjs"}');
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -114,35 +115,39 @@ Task:
               const tapeContent = engine.readCellS(engine.getD());
               let llmOutput = '';
 
+              const isFixed = (comp: string) => tapeContent.lastIndexOf(`SUCCESS: ${comp} is fixed`) > tapeContent.lastIndexOf(`ERROR: ${comp} is broken`);
+
               if (q.includes('STARTING_OMEGA')) {
                   llmOutput = '<STATE>q_2: CHECKING_C1</STATE>\n<EXEC>./build.sh C1</EXEC>';
               } else if (q.includes('CHECKING_C1')) {
-                  if (tapeContent.includes('SUCCESS: C1 is fixed')) llmOutput = '<STATE>q_3: CHECKING_C2</STATE>\n<EXEC>./build.sh C2</EXEC>';
+                  console.log("DEBUG: Tape content ending:\n", tapeContent.substring(tapeContent.length - 150));
+                  console.log("DEBUG: Tape includes SUCCESS: C1 is fixed?", tapeContent.includes('SUCCESS: C1 is fixed'));
+                  if (isFixed('C1')) llmOutput = '<STATE>q_3: CHECKING_C2</STATE>\n<EXEC>./build.sh C2</EXEC>';
                   else llmOutput = '<STATE>q_2: FIXING_C1</STATE>\n<EXEC>./fixer.sh C1</EXEC>';
               } else if (q.includes('FIXING_C1')) {
                   llmOutput = '<STATE>q_2: CHECKING_C1</STATE>\n<EXEC>./build.sh C1</EXEC>';
               } else if (q.includes('CHECKING_C2')) {
-                  if (tapeContent.includes('SUCCESS: C2 is fixed')) llmOutput = '<STATE>q_4: CHECKING_C3</STATE>\n<EXEC>./build.sh C3</EXEC>';
+                  if (isFixed('C2')) llmOutput = '<STATE>q_4: CHECKING_C3</STATE>\n<EXEC>./build.sh C3</EXEC>';
                   else llmOutput = '<STATE>q_3: FIXING_C2</STATE>\n<EXEC>./fixer.sh C2</EXEC>';
               } else if (q.includes('FIXING_C2')) {
                   llmOutput = '<STATE>q_3: CHECKING_C2</STATE>\n<EXEC>./build.sh C2</EXEC>';
               } else if (q.includes('CHECKING_C3')) {
-                  if (tapeContent.includes('SUCCESS: C3 is fixed')) llmOutput = '<STATE>q_5: CHECKING_C4</STATE>\n<EXEC>./build.sh C4</EXEC>';
+                  if (isFixed('C3')) llmOutput = '<STATE>q_5: CHECKING_C4</STATE>\n<EXEC>./build.sh C4</EXEC>';
                   else llmOutput = '<STATE>q_4: FIXING_C3</STATE>\n<EXEC>./fixer.sh C3</EXEC>';
               } else if (q.includes('FIXING_C3')) {
                   llmOutput = '<STATE>q_4: CHECKING_C3</STATE>\n<EXEC>./build.sh C3</EXEC>';
               } else if (q.includes('CHECKING_C4')) {
-                  if (tapeContent.includes('SUCCESS: C4 is fixed')) llmOutput = '<STATE>q_6: CHECKING_C5</STATE>\n<EXEC>./build.sh C5</EXEC>';
+                  if (isFixed('C4')) llmOutput = '<STATE>q_6: CHECKING_C5</STATE>\n<EXEC>./build.sh C5</EXEC>';
                   else llmOutput = '<STATE>q_5: FIXING_C4</STATE>\n<EXEC>./fixer.sh C4</EXEC>';
               } else if (q.includes('FIXING_C4')) {
                   llmOutput = '<STATE>q_5: CHECKING_C4</STATE>\n<EXEC>./build.sh C4</EXEC>';
               } else if (q.includes('CHECKING_C5')) {
-                  if (tapeContent.includes('SUCCESS: C5 is fixed')) llmOutput = '<STATE>q_7: INTEGRATION_TEST</STATE>\n<EXEC>./build.sh</EXEC>';
+                  if (isFixed('C5')) llmOutput = '<STATE>q_7: INTEGRATION_TEST</STATE>\n<EXEC>./build.sh</EXEC>';
                   else llmOutput = '<STATE>q_6: FIXING_C5</STATE>\n<EXEC>./fixer.sh C5</EXEC>';
               } else if (q.includes('FIXING_C5')) {
                   llmOutput = '<STATE>q_6: CHECKING_C5</STATE>\n<EXEC>./build.sh C5</EXEC>';
               } else if (q.includes('INTEGRATION_TEST')) {
-                  if (tapeContent.includes('SUCCESS: ALL SYSTEMS NOMINAL')) {
+                  if (tapeContent.includes('| SUCCESS: ALL SYSTEMS NOMINAL')) {
                       llmOutput = '<STATE>HALT</STATE>\n<WRITE>Omega Protocol Complete</WRITE>';
                   } else {
                       console.log("🤖 [Mock Agent]: Wait, integration failed? Let me start over to find the broken component.");
