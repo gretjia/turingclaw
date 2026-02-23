@@ -2,10 +2,20 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
+import OpenAI from 'openai';
 import { GoogleGenAI } from '@google/genai';
 import { WebSocketServer } from 'ws';
 
 const LLM_PROVIDER = process.env.LLM_PROVIDER || 'kimi';
+
+const kimi = new OpenAI({
+  baseURL: 'https://api.kimi.com/coding/v1',
+  apiKey: process.env.KIMI_API_KEY || 'dummy_key',
+  defaultHeaders: {
+    'X-Client-Name': 'TuringClaw',
+    'User-Agent': 'claude-code/0.2.15'
+  }
+});
 
 const gemini = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || 'dummy_key'
@@ -254,16 +264,20 @@ export class TuringClawEngine {
           });
           llmOutput = response.text || '';
         } else {
-          // Default to Kimi CLI
-          const promptContent = `${SYSTEM_PROMPT}\n\n${contextC}`;
-          const tmpPromptPath = path.join(WORKSPACE_DIR, '.tmp_prompt.txt');
-          fs.writeFileSync(tmpPromptPath, promptContent, 'utf-8');
+          // Default to Kimi Coding API
           try {
-            const output = await this.execPromise(`cat .tmp_prompt.txt | kimi --quiet --input-format text`, WORKSPACE_DIR);
-            llmOutput = output || '';
+            const response = await kimi.chat.completions.create({
+              model: 'kimi-for-coding',
+              messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                { role: 'user', content: contextC }
+              ],
+              temperature: 0.0,
+            });
+            llmOutput = response.choices[0]?.message?.content || '';
           } catch (e: any) {
-            console.error("Kimi CLI Error:", e.message);
-            llmOutput = '<STATE>FATAL_DEBUG</STATE>\\n<WRITE>[SYSTEM WARNING: Kimi CLI failed to execute. Check auth.]</WRITE>';
+            console.error("Kimi API Error:", e.message);
+            llmOutput = `<STATE>FATAL_DEBUG</STATE>\\n<WRITE>[SYSTEM WARNING: Kimi API failed to execute. Check auth.]</WRITE>`;
           }
         }
 
