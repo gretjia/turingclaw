@@ -18,3 +18,6 @@ workspace-runs/
 **/memory/preflight_result.txt
 **/memory/windows_supervisor.log
 **/memory/evidence/
+
+# Local Multi-Agent Documents
+/.handover/
