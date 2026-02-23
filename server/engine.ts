@@ -139,6 +139,8 @@ export class TuringClawEngine {
 
     try {
       while (true) {
+        // LAW 0: SUPPRESSING THE EVENT LOOP
+        // The loop is strictly blocking and deterministic. No Promise.all or floating async calls allowed.
         const q = this.getQ();
         const d = this.getD();
         const s = this.readCellS(d);
