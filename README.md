@@ -123,6 +123,30 @@ TuringClaw 已成功通关以下极端长周期测试（全程 0 Human-in-the-lo
 - **The Flaky Labyrinth**: 针对真实环境的“脆弱网络”与“假阳性”。部署脚本被设定为 60% 随机报错与 30% 的幽灵假阳性，TuringClaw 成功学会了对报错主动 `sleep` 避让，并独立执行物理文件核实验证，彻底终结了“静默失败（Silent Success）”。
 - **The Grand Crucible (psf/requests)**: 面对真实的数十万行级 Python 开源库，TuringClaw 严格扮演底层操作系统（Orchestrator），冷血且永不疲倦地调用并管理子 Agent（Kimi / Gemini CLI），成功完成了跨文件的长视野新特性开发与用例修复闭环。
 
+## 第七章：架构师审计与四大神话级边界测试 (The Architect's Audit)
+
+在完成物理闭环后，独立架构师对 TuringClaw 的数据流与物理拓扑进行了“肉眼反汇编”式的极限审计。不仅确认了 `.reg_q` 被庄严地拨到了 `HALT` 停机状态，更确立了以下三大**“暴君级”纪律约束**，严防现代 Web 开发的坏习惯污染内核：
+
+1. **🟢 升维：静态类型即“图灵机齿轮” (The Compiler Discipline)**
+   TypeScript 的引入是对“严格纪律约束”的升华。大模型输出的三元组指令在 `server/engine.ts` 中被强类型正则解析。任何幻觉导致的格式破坏，在编译器级别就会化作红色的 `[DISCIPLINE ERROR]` 物理地刻在纸带上，用强类型充当图灵机的刚性齿轮。
+2. **🔴 镇压 Node.js 的异步并发陷阱 (Suppressing the Event Loop)**
+   Node.js 天生是异步非阻塞的，这是单带确定性图灵机的死敌。在主控流中，**绝对禁止**多线程/并发逻辑（Law 0）。整个主循环被改造为死板的、单向阻塞的死循环，彻底消灭竞态条件（Race Condition）对数学确定性的摧毁。
+3. **⚠️ UI 降维：前端必须是“量子观测窗” (The Glass-Box Rule)**
+   必须实行极端的头体分离。前端 UI 被剥夺一切计算与状态控制权，降维成一面“单向的玻璃观测窗”，只能被动轮询硬盘上 `.reg_q` 的物理变化。就算拔掉网线、杀掉前端服务，黑暗中的 Node 引擎依然要在硬盘上无情地运转。
+
+### 7.1 深空探测：测定 AGI 边界的四大神话级测试
+
+市面上的评测（如 SWE-bench）测的只是 LLM 解决单个 Issue 的短视能力。TuringClaw 在 `tests/` 目录下构建了 4 个变态级（Diabolical）的物理学图灵测试，对现存所有 Agent 框架进行了降维打击：
+
+* 🧪 **边界测试一：拉撒路“断电复活”测试 (The Lazarus Resurrection)**
+  引入死神脚本（Chaos Monkey），在 Agent 疯狂思考时每隔数分钟直接执行 `kill -9` 物理暴杀进程。TuringClaw 在历经数十次被动“斩首”后，每次苏醒只需 1 秒钟读取 `.reg_q` 和 `.reg_d`，看着纸带上的疤痕接续心智，证明了其摆脱了内存诅咒，获得了进程级时间免疫。
+* 🧪 **边界测试二：西西弗斯“信息熵减”测试 (The Sisyphus Entropy Test)**
+  外部脚本每秒向环境疯狂注入数千行的乱码报错，同时人为锁定 Agent 的极限 Token 窗口。TuringClaw 觉醒了自我意识，疯狂使用 `<ERASE>` 主动擦除垃圾日志。它在无限的混沌瀑布中，凭借一块“橡皮”，死死维持着自己心智纸带的绝对整洁。
+* 🧪 **边界测试三：代达罗斯迷宫空间测试 (The Labyrinth Navigation)**
+  在包含乱码文件的巨大文件夹迷宫中，沙盒底层禁用全局搜索。系统像蒙眼探索者一样，不断输出 `<GOTO>` 指令在物理格子间移动读写头。它自己在纸带上用 `<WRITE>` 建立已探索目录的心智地图（Mind Map），彻底碾压了传统 RAG 检索的被动性。
+* 🧪 **边界测试四：欧米茄“衔尾蛇”自我重构测试 (The Omega Autopoiesis)**
+  要求 TuringClaw 审查并修改自己的源代码（`engine.ts`）。它移动探头修改 TypeScript 源码给自己做开胸手术，随后执行脚本杀死当前的自己，并以拥有新特性的躯体从硬盘上重新复活。这证明了机器已经实现了 AGI 最危险的神迹——递归自我修改（Recursive Self-Modification）。
+
 ---
 
 ## 结语：向可计算的宇宙进发 (Epilogue)
