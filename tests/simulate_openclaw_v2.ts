@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
-// Set dummy API key before importing engine
+// Set dummy API keys before importing engine
 process.env.KIMI_API_KEY = 'dummy_key_for_testing';
+process.env.GEMINI_API_KEY = 'dummy_key_for_testing';
 
 import { TuringClawEngine } from '../server/engine';
 

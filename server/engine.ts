@@ -2,11 +2,18 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import { WebSocketServer } from 'ws';
 
-const ai = new OpenAI({ 
+const LLM_PROVIDER = process.env.LLM_PROVIDER || 'kimi';
+
+const kimi = new OpenAI({
   baseURL: 'https://api.moonshot.cn/v1',
-  apiKey: process.env.KIMI_API_KEY || 'dummy_key' 
+  apiKey: process.env.KIMI_API_KEY || 'dummy_key'
+});
+
+const gemini = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY || 'dummy_key'
 });
 
 const WORKSPACE_DIR = path.join(process.cwd(), 'workspace');
@@ -83,14 +90,14 @@ export class TuringClawEngine {
     const targetFile = path.join(WORKSPACE_DIR, d);
     fs.mkdirSync(path.dirname(targetFile), { recursive: true });
     fs.appendFileSync(targetFile, `\n[USER REQUEST]: ${message}\n`, 'utf-8');
-    
+
     const q = this.getQ();
     if (q === "HALT" || q === "q_0: SYSTEM_BOOTING") {
-        this.setQ("q_1: PROCESSING_USER_REQUEST");
+      this.setQ("q_1: PROCESSING_USER_REQUEST");
     }
 
     this.broadcast({ type: 'tape_update', content: this.readCellS(d) });
-    
+
     if (!this.isRunning) {
       this.runSimulationLoop();
     }
@@ -101,7 +108,7 @@ export class TuringClawEngine {
     this.isRunning = true;
     this.broadcast({ type: 'status', status: 'running' });
 
-    console.log("⚙️ AI Turing Machine Started. Executing formal δ(q,s) loop...");
+    console.log(`⚙️ AI Turing Machine Started [${LLM_PROVIDER} MODE]. Executing formal δ(q,s) loop...`);
 
     try {
       while (true) {
@@ -116,23 +123,37 @@ export class TuringClawEngine {
         }
 
         const contextC = `[STATE REGISTER q]: ${q}\n[HEAD POINTER d]: ${d}\n[CELL CONTENT s]:\n${s}`;
-        console.log(`\n[${q}] Head at [${d}] -> Computing δ...`);
+        console.log(`\n[${q}] Head at [${d}] -> Computing δ (${LLM_PROVIDER})...`);
 
-        // Call Kimi API with Temperature 0 for Deterministic Collapse
-        const response = await ai.chat.completions.create({
-          model: 'moonshot-v1-8k',
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: contextC }
-          ],
-          temperature: 0.0,
-        });
+        let llmOutput = '';
 
-        const llmOutput = response.choices[0]?.message?.content || '';
+        if (LLM_PROVIDER === 'gemini') {
+          const response = await gemini.models.generateContent({
+            model: 'gemini-3.1-pro-preview',
+            contents: contextC,
+            config: {
+              systemInstruction: SYSTEM_PROMPT,
+              temperature: 0.0,
+            }
+          });
+          llmOutput = response.text || '';
+        } else {
+          // Default to Kimi
+          const response = await kimi.chat.completions.create({
+            model: 'moonshot-v1-8k',
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: contextC }
+            ],
+            temperature: 0.0,
+          });
+          llmOutput = response.choices[0]?.message?.content || '';
+        }
+
         console.log(`[δ OUTPUT]:\n${llmOutput}\n`);
 
         await this.applyDelta(llmOutput, d);
-        
+
         // Broadcast updates
         this.broadcast({ type: 'tape_update', content: this.readCellS(this.getD()) });
         this.broadcast({ type: 'state_update', q: this.getQ(), d: this.getD() });
@@ -165,7 +186,7 @@ export class TuringClawEngine {
     const dPrime = gotoMatch ? gotoMatch[1].trim() : currentD;
 
     // 3. Symbol Operations s'
-    
+
     // <WRITE>
     const writeRegex = /<WRITE>(.*?)<\/WRITE>/gs;
     let writeMatch;
