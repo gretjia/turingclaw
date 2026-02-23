@@ -1,10 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
-import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 import { WebSocketServer } from 'ws';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || 'dummy_key' });
+const ai = new OpenAI({ 
+  baseURL: 'https://api.moonshot.cn/v1',
+  apiKey: process.env.KIMI_API_KEY || 'dummy_key' 
+});
 
 const WORKSPACE_DIR = path.join(process.cwd(), 'workspace');
 const FILE_Q = path.join(WORKSPACE_DIR, '.reg_q');
@@ -115,17 +118,17 @@ export class TuringClawEngine {
         const contextC = `[STATE REGISTER q]: ${q}\n[HEAD POINTER d]: ${d}\n[CELL CONTENT s]:\n${s}`;
         console.log(`\n[${q}] Head at [${d}] -> Computing δ...`);
 
-        // Call Gemini with Temperature 0 for Deterministic Collapse
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.1-pro-preview',
-          contents: contextC,
-          config: {
-            systemInstruction: SYSTEM_PROMPT,
-            temperature: 0.0,
-          }
+        // Call Kimi API with Temperature 0 for Deterministic Collapse
+        const response = await ai.chat.completions.create({
+          model: 'moonshot-v1-8k',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: contextC }
+          ],
+          temperature: 0.0,
         });
 
-        const llmOutput = response.text || '';
+        const llmOutput = response.choices[0]?.message?.content || '';
         console.log(`[δ OUTPUT]:\n${llmOutput}\n`);
 
         await this.applyDelta(llmOutput, d);
