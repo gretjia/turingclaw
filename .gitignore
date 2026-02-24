@@ -6,7 +6,14 @@ coverage/
 *.log
 .env*
 !.env.example
-.handover/
+
+# Handover docs policy:
+# - Shareable docs live in .handover/*.md (tracked)
+# - Private/local notes live in .handover/local/ (ignored)
+.handover/local/
+.handover/local/**
+!.handover/
+!.handover/*.md
 
 # TuringClaw Workspaces and Tape Memory
 workspace/
