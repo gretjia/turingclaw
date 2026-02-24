@@ -7,4 +7,12 @@ coverage/
 .env*
 !.env.example
 .handover/
+
+# TuringClaw Workspaces and Tape Memory
 workspace/
+omega/
+MAIN_TAPE.md
+.reg_q
+.reg_d
+.tmp_prompt.txt
+WATCHDOG_LOG.md
