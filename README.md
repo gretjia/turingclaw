@@ -149,6 +149,60 @@ TuringClaw 已成功通关以下极端长周期测试（全程 0 Human-in-the-lo
 
 ---
 
+## 第八章：多智能体握手协议 (Agent-to-Agent Handover Guide)
+
+TuringClaw 绝不是为了与人类进行“聊天”而设计的。它是一个纯粹的执行引擎，是最理想的**“底层算力/执行者 Agent”**。如果你是一个负责架构设计、需求拆解的“主脑 Agent”（如 Roo Code, Kilo Code, Kimi CLI 等），你需要将庞大的长周期任务交给 TuringClaw 挂机执行，**请严格遵循以下物理纪律构建 `MAIN_TAPE.md`**：
+
+### 8.1 不要尝试“对话”，直接烧录纸带
+TuringClaw 没有聊天历史。你必须在目标机器上新建一个专用文件夹（Workspace），然后直接通过写文件的方式，将任务烧录进纸带。
+
+**标准启动流程：**
+```bash
+# 1. 建立纯净的工作区
+mkdir -p ./my_task_workspace
+
+# 2. 烧录物理纸带 (直接写文件，不要通过 CLI 聊天)
+cat << 'EOF' > ./my_task_workspace/MAIN_TAPE.md
+[严格的四步法 Prompt，见 8.2]
+EOF
+
+# 3. 注入初始状态寄存器
+echo "q_1: TASK_INITIALIZATION" > ./my_task_workspace/.reg_q
+echo "MAIN_TAPE.md" > ./my_task_workspace/.reg_d
+
+# 4. 拔掉网线，让机器在黑暗中挂机运转 (后台执行)
+export TURINGCLAW_WORKSPACE=./my_task_workspace
+npm run cli > ./my_task_workspace/engine.log 2>&1 &
+```
+
+### 8.2 纸带烧录的四大纪律 (The Tape Anatomy)
+你注入到 `MAIN_TAPE.md` 中的内容必须严格遵循以下四个区块。**不要包含任何废话，不要教它怎么写代码，只需定义物理环境与验证规则。**
+
+**A. 核心角色 (The Role)**
+*用一句话定义它的身份和终极目标。*
+> "You are a backend refactoring agent. Your mission is to migrate the entire `/src/auth` module from Express to Fastify."
+
+**B. 物理环境 (The Environment)**
+*清晰界定它当前所处的绝对或相对路径，以及哪些目录是允许修改的。*
+> "Your root directory is `/app`. The target code is in `/app/src/auth`. The tests are in `/app/tests/auth`."
+
+**C. 交战法则 (The Rules of Engagement)**
+*用无情的祈使句，明确列出必须遵守的操作边界，特别是如何“验证”自己的工作。*
+> 1. DO NOT assume the code works after modifying it.
+> 2. You MUST run `<EXEC>npm run test:auth</EXEC>` after every modification to verify your logic.
+> 3. If the test fails, read the error output from the tape and use `<REPLACE>` to fix the source code.
+
+**D. 停机条件 (The <STATE>HALT</STATE> Condition)**
+***绝对关键！*** *如果没有明确的停机条件，TuringClaw 将会陷入死循环。必须定义一个客观的、物理可验证的退出条件。*
+> You must output `<STATE>HALT</STATE>` ONLY when `<EXEC>npm run test:auth</EXEC>` outputs "100% PASS" and there are no linting errors.
+
+### 8.3 监控与回收 (Observability)
+主脑 Agent 在启动 TuringClaw 后，不应干预其执行。你应该通过以下方式监控它：
+1. 定期读取 `./my_task_workspace/.reg_q` 的状态变化。
+2. 当 `.reg_q` 变为 `HALT` 时，说明任务完成，主脑 Agent 可以接管后续的部署或 Review 流程。
+
+---
+
 ## 结语：向可计算的宇宙进发 (Epilogue)
 
 TuringClaw 不是一个比拼 Prompt 花哨程度的玩具，也不是一个试图用代码堆砌出“智能假象”的框架。它是一次计算哲学向真理的回归。
