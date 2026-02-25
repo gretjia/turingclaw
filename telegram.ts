@@ -58,6 +58,9 @@ const TMUX_MIN_PUSH_SECONDS = Number(process.env.TELEGRAM_TMUX_MIN_PUSH_SECONDS 
 const TMUX_QUIET_SECONDS = Number(process.env.TELEGRAM_TMUX_QUIET_SECONDS || 3);
 const TMUX_MAX_BATCH_SECONDS = Number(process.env.TELEGRAM_TMUX_MAX_BATCH_SECONDS || 15);
 const TMUX_MIN_BATCH_LINES = Number(process.env.TELEGRAM_TMUX_MIN_BATCH_LINES || 2);
+const TMUX_TYPING_QUIET_SECONDS = Number(process.env.TELEGRAM_TMUX_TYPING_QUIET_SECONDS || 8);
+const AGENT_COLLECT_SECONDS = Number(process.env.TELEGRAM_AGENT_COLLECT_SECONDS || 4);
+const CONFIRM_TTL_SECONDS = Number(process.env.TELEGRAM_CONFIRM_TTL_SECONDS || 180);
 const STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS || 120);
 const HEARTBEAT_SECONDS = Number(process.env.TELEGRAM_HEARTBEAT_SECONDS || 45);
 const MAX_RECOVERY_ATTEMPTS = Number(process.env.TELEGRAM_MAX_RECOVERY_ATTEMPTS || 3);
@@ -99,10 +102,44 @@ type TaskItem = {
   updatedAt: number;
 };
 
+type PendingRiskConfirm =
+  | {
+      lane: "tmux";
+      createdAt: number;
+      expiresAt: number;
+      riskTags: string[];
+      target: string;
+      payload: string;
+      pressEnter: boolean;
+    }
+  | {
+      lane: "agent";
+      createdAt: number;
+      expiresAt: number;
+      riskTags: string[];
+      agentName: string;
+      project: string;
+      text: string;
+    };
+
+type PendingAgentCollect = {
+  key: string;
+  chatId: string;
+  chatNumericId: number;
+  agentName: string;
+  project: string;
+  lines: string[];
+  startedAt: number;
+  updatedAt: number;
+  timer: NodeJS.Timeout;
+};
+
 const sessions = new Map<string, SessionState>();
 const agents = new Map<string, AgentProcess>();
 const trackers = new Map<string, AgentTracker>();
 const tmuxWatchers = new Map<string, TmuxWatcher>();
+const pendingRiskConfirms = new Map<string, PendingRiskConfirm>();
+const pendingAgentCollects = new Map<string, PendingAgentCollect>();
 
 function loadJsonFile<T>(file: string, fallback: T): T {
   try {
@@ -233,6 +270,119 @@ function parseAgentOverrideText(text: string): string | null {
   return payload || null;
 }
 
+function parseTmuxOverrideText(text: string): string | null {
+  const m = text.match(/^\s*tmux\s*[:：]\s*(.+)$/i);
+  if (!m?.[1]) return null;
+  const payload = m[1].trim();
+  return payload || null;
+}
+
+function parseTmuxOverridePayload(
+  overrideText: string,
+  fallbackTarget: string | null
+): { target: string | null; payload: string; pressEnter: boolean } | null {
+  let text = overrideText.trim();
+  if (!text) return null;
+
+  let pressEnter = true;
+  if (/\s+noenter$/i.test(text)) {
+    text = text.replace(/\s+noenter$/i, "").trim();
+    pressEnter = false;
+  }
+
+  let target = fallbackTarget;
+  const explicit = text.match(/^([A-Za-z0-9:_.%+-]{1,64})\s*\|\s*(.+)$/);
+  if (explicit?.[1] && explicit?.[2]) {
+    target = sanitizeTmuxTarget(explicit[1]);
+    text = explicit[2].trim();
+  }
+
+  if (!text) return null;
+  return { target, payload: text, pressEnter };
+}
+
+type RiskRule = {
+  re: RegExp;
+  tag: string;
+};
+
+const HIGH_RISK_RULES: RiskRule[] = [
+  { re: /\bgit\s+push\b/i, tag: "git push" },
+  { re: /\bgit\s+reset\s+--hard\b/i, tag: "git reset --hard" },
+  { re: /\brm\s+-rf\b/i, tag: "rm -rf" },
+  { re: /\bmkfs\b/i, tag: "mkfs" },
+  { re: /\bdd\s+if=/i, tag: "dd if=" },
+  { re: /\bshutdown\b/i, tag: "shutdown" },
+  { re: /\breboot\b/i, tag: "reboot" },
+];
+
+function detectHighRiskTags(text: string): string[] {
+  const tags: string[] = [];
+  for (const rule of HIGH_RISK_RULES) {
+    if (rule.re.test(text)) tags.push(rule.tag);
+  }
+  return Array.from(new Set(tags));
+}
+
+function confirmKey(chatId: number | string): string {
+  return String(chatId);
+}
+
+function isNaturalConfirmText(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === "确认执行";
+}
+
+function isNaturalCancelConfirmText(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed === "取消确认";
+}
+
+function getPendingRiskConfirm(chatId: number | string): PendingRiskConfirm | null {
+  const key = confirmKey(chatId);
+  const pending = pendingRiskConfirms.get(key);
+  if (!pending) return null;
+  if (Date.now() > pending.expiresAt) {
+    pendingRiskConfirms.delete(key);
+    return null;
+  }
+  return pending;
+}
+
+function clearPendingRiskConfirm(chatId: number | string): PendingRiskConfirm | null {
+  const key = confirmKey(chatId);
+  const pending = pendingRiskConfirms.get(key) || null;
+  pendingRiskConfirms.delete(key);
+  return pending;
+}
+
+function setPendingRiskConfirm(chatId: number | string, pending: PendingRiskConfirm): void {
+  pendingRiskConfirms.set(confirmKey(chatId), pending);
+}
+
+function previewText(text: string, max = 140): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= max) return compact;
+  return `${compact.slice(0, Math.max(1, max - 3))}...`;
+}
+
+function formatPendingRiskConfirm(pending: PendingRiskConfirm): string {
+  const ttlSeconds = Math.max(1, Math.floor((pending.expiresAt - Date.now()) / 1000));
+  const base = [
+    "high-risk action requires confirmation",
+    `lane=${pending.lane}`,
+    `risks=${pending.riskTags.join(", ")}`,
+    `expires_in=${ttlSeconds}s`,
+    "reply /confirm to execute, /cancelconfirm to abort.",
+  ];
+  if (pending.lane === "tmux") {
+    base.push(`target=${pending.target}`, `payload=${previewText(pending.payload)}`);
+  } else {
+    base.push(`agent=${pending.agentName}`, `project=${pending.project}`, `task=${previewText(pending.text)}`);
+  }
+  return base.join("\n");
+}
+
 function isTmuxMonitorRequest(text: string): boolean {
   const lower = text.toLowerCase();
   if (!lower.includes("tmux")) return false;
@@ -288,6 +438,16 @@ function isTransientTmuxLine(rawLine: string): boolean {
     /context left$/i.test(line) ||
     /^─\s*Worked for .*─$/u.test(line)
   );
+}
+
+function isLikelyInteractivePromptLine(rawLine: string): boolean {
+  const line = rawLine.trim();
+  if (!line || line.length > 220) return false;
+
+  if (/^[\w.-]+@[\w.-]+[:~\/\w.-]*\s*[#$]\s+.*$/.test(line)) return true;
+  if (/^PS\s+[A-Za-z]:\\.*>\s+.*$/.test(line)) return true;
+  if (/^[A-Za-z0-9._/-]+[#$>]\s+.*$/.test(line)) return true;
+  return false;
 }
 
 function canonicalizeLineForDedupe(line: string): string {
@@ -1120,6 +1280,7 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
           const now = Date.now();
           const minGapMs = Math.max(1, TMUX_MIN_PUSH_SECONDS) * 1000;
           const quietMs = Math.max(1, TMUX_QUIET_SECONDS) * 1000;
+          const typingQuietMs = Math.max(2, TMUX_TYPING_QUIET_SECONDS) * 1000;
           const maxBatchMs = Math.max(2, TMUX_MAX_BATCH_SECONDS) * 1000;
           const minBatchLines = Math.max(1, TMUX_MIN_BATCH_LINES);
 
@@ -1137,16 +1298,23 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
           }
 
           const pendingAge = live.pendingSinceAt > 0 ? now - live.pendingSinceAt : 0;
+          const promptOnlyPending =
+            live.pendingLines.length > 0 &&
+            live.pendingLines.every((line) => isLikelyInteractivePromptLine(line));
+          const effectiveQuietMs = promptOnlyPending ? Math.max(quietMs, typingQuietMs) : quietMs;
           const shouldFlush =
             live.pendingLines.length > 0 &&
             now - live.lastSentAt >= minGapMs &&
             (
-              (live.pendingLines.length >= minBatchLines && now - live.lastDigestChangeAt >= quietMs) ||
+              (live.pendingLines.length >= minBatchLines && now - live.lastDigestChangeAt >= effectiveQuietMs) ||
               pendingAge >= maxBatchMs
             );
 
           if (shouldFlush) {
-            const payloadLines = live.pendingLines.slice(-Math.max(20, TMUX_TAIL_LINES));
+            const payloadLines =
+              live.lastTailLines.length > 0
+                ? live.lastTailLines.slice(-Math.max(20, TMUX_TAIL_LINES))
+                : live.pendingLines.slice(-Math.max(20, TMUX_TAIL_LINES));
             const sig = payloadSignature(payloadLines);
             if (!sig || live.recentPayloadSigs.includes(sig)) {
               live.pendingLines = [];
@@ -1238,6 +1406,9 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
         "/cancel <task_id> - cancel queued/running task",
         "/interrupt - cancel current running task",
         "/resume <task_id> - clone a history task back to queue",
+        "/flush - flush collected agent inputs immediately",
+        "/confirm - execute pending high-risk action",
+        "/cancelconfirm - cancel pending high-risk action",
         "/status - read .reg_q/.reg_d",
         "/where - show host current directory and listing preview",
         "/tape [n] - tail MAIN_TAPE.md (default 40 lines)",
@@ -1246,6 +1417,7 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
         "/tmuxtype <text> - send text to currently watched tmux target",
         "/tmuxstop - stop active tmux live watcher",
         "/bash <cmd> - run shell command (optional, disabled by default)",
+        "Explicit routes: 'agent: <task>' and 'tmux: <text>' (or 'tmux: <target>|<text>').",
         "Natural-language tmux monitor: send 'tmux attach -t <pane>, 实时监测并推送变化'.",
         "Natural-language tmux input: send '在tmux %1中输入：同意。'",
         "When tmux watcher is active, plain text goes to tmux by default. Use 'agent: ...' to force agent task mode.",
@@ -1412,6 +1584,32 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
     return;
   }
 
+  if (cmd === "/flush") {
+    const key = collectKey(chatId, session.activeAgent);
+    const pending = pendingAgentCollects.get(key);
+    if (!pending) {
+      await sendMessage(msg.chat.id, "no pending collected inputs for active agent.");
+      return;
+    }
+    const count = await flushAgentCollect(key, "manual");
+    await sendMessage(msg.chat.id, `collect flushed\nagent=${session.activeAgent}\nitems=${count}`);
+    return;
+  }
+
+  if (cmd === "/confirm") {
+    const executed = await runPendingRiskConfirm(msg.chat.id, chatId);
+    if (!executed) {
+      await sendMessage(msg.chat.id, "no pending confirmation.");
+    }
+    return;
+  }
+
+  if (cmd === "/cancelconfirm") {
+    const cancelled = clearPendingRiskConfirm(msg.chat.id);
+    await sendMessage(msg.chat.id, cancelled ? "pending confirmation cancelled." : "no pending confirmation.");
+    return;
+  }
+
   if (cmd === "/status") {
     const agent = getOrStartAgent(chatId, session.activeAgent);
     await sendMessage(msg.chat.id, readStatus(agent.workspace));
@@ -1458,12 +1656,7 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
       await sendMessage(msg.chat.id, "usage: /tmuxsend <target> <text>");
       return;
     }
-    try {
-      await sendTmuxInput(target, payload, true);
-      await sendMessage(msg.chat.id, `tmux input sent\ntarget=${target}\npayload=${payload}`);
-    } catch (error: any) {
-      await sendMessage(msg.chat.id, `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown"}`);
-    }
+    await sendTmuxInputWithRiskGate(msg.chat.id, target, payload, true);
     return;
   }
 
@@ -1478,12 +1671,7 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
       await sendMessage(msg.chat.id, "usage: /tmuxtype <text>");
       return;
     }
-    try {
-      await sendTmuxInput(target, payload, true);
-      await sendMessage(msg.chat.id, `tmux input sent\ntarget=${target}\npayload=${payload}`);
-    } catch (error: any) {
-      await sendMessage(msg.chat.id, `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown"}`);
-    }
+    await sendTmuxInputWithRiskGate(msg.chat.id, target, payload, true);
     return;
   }
 
@@ -1506,116 +1694,45 @@ function buildEnrichedTaskText(agent: AgentProcess, project: string, rawText: st
   ].join("\n");
 }
 
-async function handleTextMessage(msg: TelegramMessage, text: string) {
-  // Ops-style natural language questions should get an immediate host answer.
-  if (isHostDirectoryQuestion(text)) {
-    const info = await describeHostDirectory();
-    await sendMessage(msg.chat.id, info);
-    return;
-  }
+function ensureAgentTracker(key: string, workspace: string): AgentTracker {
+  const existing = trackers.get(key);
+  if (existing) return existing;
 
-  if (isTmuxStopRequest(text)) {
-    const stopped = stopTmuxWatcher(msg.chat.id);
-    await sendMessage(msg.chat.id, stopped ? "tmux watcher stopped." : "no active tmux watcher.");
-    return;
-  }
+  const created: AgentTracker = {
+    lastQ: readQ(workspace),
+    awaitingResult: false,
+    seenWorkingState: false,
+    lastQChangeAt: Date.now(),
+    lastNotifyAt: 0,
+    recoveryAttempts: 0,
+    queue: [],
+    history: [],
+  };
+  trackers.set(key, created);
+  return created;
+}
 
-  const chatId = String(msg.chat.id);
-  const session = getSession(chatId);
-  const agentOverrideText = parseAgentOverrideText(text);
-  const explicitTarget = extractTmuxTarget(text);
-  const watchedTarget = activeTmuxTarget(msg.chat.id);
-  const explicitParsed = extractTmuxInputPayload(text);
-  const implicitParsed = extractImplicitReplyPayload(text);
-  const shouldRouteTmuxInput =
-    isTmuxInputRequest(text) ||
-    (Boolean(watchedTarget) && isImplicitTmuxInputRequest(text));
-
-  if (shouldRouteTmuxInput) {
-    const target = explicitTarget ?? watchedTarget;
-    const parsed = explicitParsed ?? implicitParsed;
-
-    if (!target || !parsed) {
-      await sendMessage(
-        msg.chat.id,
-        "tmux input parse failed. use: 在tmux attach -t %1中输入：同意。 或 /tmuxsend %1 同意。"
-      );
-      return;
-    }
-
-    try {
-      await sendTmuxInput(target, parsed.payload, parsed.pressEnter);
-      await sendMessage(
-        msg.chat.id,
-        `tmux input sent\ntarget=${target}\npayload=${parsed.payload}\nenter=${parsed.pressEnter}`
-      );
-    } catch (error: any) {
-      await sendMessage(
-        msg.chat.id,
-        `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown error"}`
-      );
-    }
-    return;
-  }
-
-  const monitorTarget = extractTmuxTarget(text);
-  if (monitorTarget && isTmuxMonitorRequest(text)) {
-    const cancelledTaskId = cancelRunningTask(chatId, session.activeAgent, "superseded by tmux live monitor");
-    await startTmuxWatcher(msg.chat.id, monitorTarget);
-    if (cancelledTaskId) {
-      await sendMessage(msg.chat.id, `cancelled previous agent task: ${cancelledTaskId}`);
-    }
-    return;
-  }
-
-  // Focus mode: while watching a tmux pane, plain text defaults to tmux input.
-  if (watchedTarget && !agentOverrideText) {
-    const payload = text.trim();
-    if (!payload) return;
-    try {
-      await sendTmuxInput(watchedTarget, payload, true);
-      await sendMessage(
-        msg.chat.id,
-        `tmux input sent\ntarget=${watchedTarget}\npayload=${payload}\nenter=true`
-      );
-    } catch (error: any) {
-      await sendMessage(
-        msg.chat.id,
-        `tmux input failed\ntarget=${watchedTarget}\nerror=${error?.message || "unknown error"}`
-      );
-    }
-    return;
-  }
-
-  const agent = getOrStartAgent(chatId, session.activeAgent);
-  const key = keyFor(chatId, session.activeAgent);
-  const tracker =
-    trackers.get(key) ||
-    ({
-      lastQ: readQ(agent.workspace),
-      awaitingResult: false,
-      seenWorkingState: false,
-      lastQChangeAt: Date.now(),
-      lastNotifyAt: 0,
-      recoveryAttempts: 0,
-      queue: [],
-      history: [],
-    } satisfies AgentTracker);
-
-  const project = sanitizeProjectName(session.activeProject || inferProjectFromText(text));
-  session.activeProject = project;
-  saveSessions();
+async function enqueueAgentTask(
+  chatNumericId: number,
+  chatId: string,
+  agentName: string,
+  project: string,
+  rawText: string
+): Promise<void> {
+  const agent = getOrStartAgent(chatId, agentName);
+  const key = keyFor(chatId, agentName);
+  const tracker = ensureAgentTracker(key, agent.workspace);
 
   const task: TaskItem = {
     id: newTaskId(),
     state: "queued",
     project,
-    text: buildEnrichedTaskText(agent, project, agentOverrideText ?? text),
+    text: buildEnrichedTaskText(agent, project, rawText),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
   tracker.queue.push(task);
-  // If nothing is running, promote immediately; otherwise keep queued.
+
   if (!tracker.awaitingResult && !tracker.currentTaskId) {
     const first = tracker.queue.shift()!;
     first.state = "running";
@@ -1631,7 +1748,7 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
     enqueueUserRequest(agent.workspace, first.text);
     appendProjectNotebook(agent.workspace, project, "Task Start", `task_id=${first.id}\nstate=running`);
     await sendMessage(
-      msg.chat.id,
+      chatNumericId,
       `task running\ntask_id=${first.id}\nagent=${agent.name}\nproject=${project}\n${readStatus(agent.workspace)}`
     );
     trackers.set(key, tracker);
@@ -1640,11 +1757,289 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
 
   trackers.set(key, tracker);
   await sendMessage(
-    msg.chat.id,
+    chatNumericId,
     `task queued\ntask_id=${task.id}\nagent=${agent.name}\nproject=${project}\nqueue_len=${tracker.queue.length}\ncurrent_task=${
       tracker.currentTaskId || "(none)"
     }`
   );
+}
+
+function collectKey(chatId: string, agentName: string): string {
+  return keyFor(chatId, agentName);
+}
+
+function combineCollectedLines(lines: string[]): string {
+  const cleaned = lines.map((line) => line.trim()).filter(Boolean);
+  if (cleaned.length <= 1) return cleaned[0] || "";
+  return [`[COLLECTED_USER_REQUESTS count=${cleaned.length}]`, ...cleaned.map((line, idx) => `[${idx + 1}] ${line}`)].join(
+    "\n\n"
+  );
+}
+
+function scheduleCollectFlush(key: string): NodeJS.Timeout {
+  return setTimeout(() => {
+    void flushAgentCollect(key, "timer").catch((error: any) => {
+      console.error("[telegram] collect flush failed:", error?.message || "unknown");
+    });
+  }, Math.max(1, AGENT_COLLECT_SECONDS) * 1000);
+}
+
+async function flushAgentCollect(key: string, _reason: "timer" | "manual" | "project-switch"): Promise<number> {
+  const pending = pendingAgentCollects.get(key);
+  if (!pending) return 0;
+  clearTimeout(pending.timer);
+  pendingAgentCollects.delete(key);
+
+  const count = pending.lines.length;
+  const combined = combineCollectedLines(pending.lines);
+  if (!combined) return 0;
+
+  await enqueueAgentTask(
+    pending.chatNumericId,
+    pending.chatId,
+    pending.agentName,
+    sanitizeProjectName(pending.project),
+    combined
+  );
+  return count;
+}
+
+async function enqueueAgentTaskWithCollect(
+  chatNumericId: number,
+  chatId: string,
+  agentName: string,
+  project: string,
+  rawText: string
+): Promise<void> {
+  if (AGENT_COLLECT_SECONDS <= 0) {
+    await enqueueAgentTask(chatNumericId, chatId, agentName, project, rawText);
+    return;
+  }
+
+  const key = collectKey(chatId, agentName);
+  let pending = pendingAgentCollects.get(key);
+  if (pending && sanitizeProjectName(pending.project) !== sanitizeProjectName(project)) {
+    await flushAgentCollect(key, "project-switch");
+    pending = undefined;
+  }
+
+  if (!pending) {
+    pending = {
+      key,
+      chatId,
+      chatNumericId,
+      agentName,
+      project,
+      lines: [],
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      timer: scheduleCollectFlush(key),
+    };
+    pendingAgentCollects.set(key, pending);
+    await sendMessage(
+      chatNumericId,
+      `agent collect started\nagent=${agentName}\nproject=${project}\nwindow=${AGENT_COLLECT_SECONDS}s\nuse /flush to dispatch now`
+    );
+  } else {
+    clearTimeout(pending.timer);
+    pending.timer = scheduleCollectFlush(key);
+  }
+
+  pending.lines.push(rawText);
+  pending.updatedAt = Date.now();
+  pending.project = project;
+  pendingAgentCollects.set(key, pending);
+}
+
+async function executeTmuxInput(
+  chatNumericId: number,
+  target: string,
+  payload: string,
+  pressEnter: boolean
+): Promise<void> {
+  try {
+    await sendTmuxInput(target, payload, pressEnter);
+    await sendMessage(chatNumericId, `tmux input sent\ntarget=${target}\npayload=${payload}\nenter=${pressEnter}`);
+  } catch (error: any) {
+    await sendMessage(chatNumericId, `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown error"}`);
+  }
+}
+
+async function requestRiskConfirm(chatNumericId: number, pending: PendingRiskConfirm): Promise<void> {
+  const replaced = getPendingRiskConfirm(chatNumericId);
+  setPendingRiskConfirm(chatNumericId, pending);
+  const prefix = replaced ? "previous pending confirmation replaced.\n" : "";
+  await sendMessage(chatNumericId, `${prefix}${formatPendingRiskConfirm(pending)}`);
+}
+
+async function runPendingRiskConfirm(chatNumericId: number, chatId: string): Promise<boolean> {
+  const pending = getPendingRiskConfirm(chatNumericId);
+  if (!pending) return false;
+  clearPendingRiskConfirm(chatNumericId);
+
+  if (pending.lane === "tmux") {
+    await executeTmuxInput(chatNumericId, pending.target, pending.payload, pending.pressEnter);
+    return true;
+  }
+
+  const key = collectKey(chatId, pending.agentName);
+  await flushAgentCollect(key, "manual");
+  await enqueueAgentTask(
+    chatNumericId,
+    chatId,
+    pending.agentName,
+    sanitizeProjectName(pending.project),
+    pending.text
+  );
+  return true;
+}
+
+async function sendTmuxInputWithRiskGate(
+  chatNumericId: number,
+  target: string,
+  payload: string,
+  pressEnter: boolean
+): Promise<void> {
+  const riskTags = detectHighRiskTags(payload);
+  if (riskTags.length > 0) {
+    const now = Date.now();
+    await requestRiskConfirm(chatNumericId, {
+      lane: "tmux",
+      createdAt: now,
+      expiresAt: now + Math.max(10, CONFIRM_TTL_SECONDS) * 1000,
+      riskTags,
+      target,
+      payload,
+      pressEnter,
+    });
+    return;
+  }
+  await executeTmuxInput(chatNumericId, target, payload, pressEnter);
+}
+
+async function enqueueAgentTaskWithRiskGate(
+  chatNumericId: number,
+  chatId: string,
+  agentName: string,
+  project: string,
+  rawText: string
+): Promise<void> {
+  const riskTags = detectHighRiskTags(rawText);
+  if (riskTags.length > 0) {
+    const now = Date.now();
+    await requestRiskConfirm(chatNumericId, {
+      lane: "agent",
+      createdAt: now,
+      expiresAt: now + Math.max(10, CONFIRM_TTL_SECONDS) * 1000,
+      riskTags,
+      agentName,
+      project,
+      text: rawText,
+    });
+    return;
+  }
+  await enqueueAgentTaskWithCollect(chatNumericId, chatId, agentName, project, rawText);
+}
+
+async function handleTextMessage(msg: TelegramMessage, text: string) {
+  // Ops-style natural language questions should get an immediate host answer.
+  if (isHostDirectoryQuestion(text)) {
+    const info = await describeHostDirectory();
+    await sendMessage(msg.chat.id, info);
+    return;
+  }
+
+  if (isTmuxStopRequest(text)) {
+    const stopped = stopTmuxWatcher(msg.chat.id);
+    await sendMessage(msg.chat.id, stopped ? "tmux watcher stopped." : "no active tmux watcher.");
+    return;
+  }
+
+  if (isNaturalCancelConfirmText(text)) {
+    const cancelled = clearPendingRiskConfirm(msg.chat.id);
+    await sendMessage(msg.chat.id, cancelled ? "pending confirmation cancelled." : "no pending confirmation.");
+    return;
+  }
+
+  if (isNaturalConfirmText(text)) {
+    const executed = await runPendingRiskConfirm(msg.chat.id, String(msg.chat.id));
+    if (!executed) {
+      await sendMessage(msg.chat.id, "no pending confirmation.");
+    }
+    return;
+  }
+
+  const chatId = String(msg.chat.id);
+  const session = getSession(chatId);
+  const watchedTarget = activeTmuxTarget(msg.chat.id);
+  const tmuxOverrideText = parseTmuxOverrideText(text);
+  const agentOverrideText = parseAgentOverrideText(text);
+
+  // Route precedence: explicit command (handled upstream) > explicit lane directive > heuristics/default.
+  if (tmuxOverrideText) {
+    const parsed = parseTmuxOverridePayload(tmuxOverrideText, watchedTarget);
+    if (!parsed?.target || !parsed.payload) {
+      await sendMessage(
+        msg.chat.id,
+        "tmux override parse failed. use: tmux: <text> (with active watcher) or tmux: <target>|<text>"
+      );
+      return;
+    }
+    await sendTmuxInputWithRiskGate(msg.chat.id, parsed.target, parsed.payload, parsed.pressEnter);
+    return;
+  }
+
+  if (agentOverrideText) {
+    const project = sanitizeProjectName(session.activeProject || inferProjectFromText(agentOverrideText));
+    session.activeProject = project;
+    saveSessions();
+    await enqueueAgentTaskWithRiskGate(msg.chat.id, chatId, session.activeAgent, project, agentOverrideText);
+    return;
+  }
+
+  const monitorTarget = extractTmuxTarget(text);
+  if (monitorTarget && isTmuxMonitorRequest(text)) {
+    const cancelledTaskId = cancelRunningTask(chatId, session.activeAgent, "superseded by tmux live monitor");
+    await startTmuxWatcher(msg.chat.id, monitorTarget);
+    if (cancelledTaskId) {
+      await sendMessage(msg.chat.id, `cancelled previous agent task: ${cancelledTaskId}`);
+    }
+    return;
+  }
+
+  const explicitTarget = extractTmuxTarget(text);
+  const explicitParsed = extractTmuxInputPayload(text);
+  const implicitParsed = extractImplicitReplyPayload(text);
+  const shouldRouteTmuxInput =
+    isTmuxInputRequest(text) ||
+    (Boolean(watchedTarget) && isImplicitTmuxInputRequest(text));
+
+  if (shouldRouteTmuxInput) {
+    const target = explicitTarget ?? watchedTarget;
+    const parsed = explicitParsed ?? implicitParsed;
+    if (!target || !parsed) {
+      await sendMessage(
+        msg.chat.id,
+        "tmux input parse failed. use: 在tmux attach -t %1中输入：同意。 或 /tmuxsend %1 同意。"
+      );
+      return;
+    }
+    await sendTmuxInputWithRiskGate(msg.chat.id, target, parsed.payload, parsed.pressEnter);
+    return;
+  }
+
+  // Focus mode: while watching a tmux pane, plain text defaults to tmux input.
+  if (watchedTarget) {
+    const payload = text.trim();
+    if (!payload) return;
+    await sendTmuxInputWithRiskGate(msg.chat.id, watchedTarget, payload, true);
+    return;
+  }
+
+  const project = sanitizeProjectName(session.activeProject || inferProjectFromText(text));
+  session.activeProject = project;
+  saveSessions();
+  await enqueueAgentTaskWithRiskGate(msg.chat.id, chatId, session.activeAgent, project, text);
 }
 
 async function handleUpdate(update: TelegramUpdate) {
