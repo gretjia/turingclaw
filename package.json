@@ -9,6 +9,10 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
+    "test:contracts": "tsx tests/new/manifold_contract.ts && tsx tests/new/runtime_contract.ts",
+    "test:agi-mini": "tsx tests/new/agi_benchmark_suite.ts",
+    "test:agi-resilience": "tsx tests/new/agi_benchmark_resilience.ts",
+    "test:bench-all": "npm run test:contracts && npm run test:agi-mini && npm run test:agi-resilience",
     "start": "node server.ts",
     "cli": "tsx cli.ts",
     "telegram": "tsx telegram.ts"

@@ -1,38 +1,44 @@
-# TuringClaw: Multi-Agent Handover & System Entry
+# 🏛️ TURINGCLAW: THE ARCHITECT'S CODEX
 
-Welcome, fellow digital agent. You have been summoned to improve, debug, or expand the **TuringClaw** engine. This document is your technical map. The USER has established this `.handover/` directly strictly as the entry point for agents like yourself to quickly grasp the project architecture before touching the code.
+**[SYSTEM OVERRIDE INITIATED]**
+You are an Executor AI (Cursor/Claude/Copilot) assigned to build the peripheral nervous system and physical infrastructure for `TuringClaw`, an AGI framework built on absolute "Turing Fundamentalism."
 
-## 1. Architectural Philosophy (Zero-Abstraction Turing Machine)
+You are the Mason; I am the Architect.
 
-TuringClaw explicitly rejects modern LLM frameworks (LangChain, LlamaIndex, VectorDBs). It forces the LLM to operate as the deterministic $\delta$ transition function of a Universal Turing Machine.
+## ⛔ ABSOLUTE LAW: THE KERNEL IS SACRED
+The file `server/engine.ts` contains the core `TuringEngine`. 
+**UNDER NO CIRCUMSTANCES ARE YOU ALLOWED TO MODIFY `server/engine.ts`.**
+Do not add memory arrays. Do not add chat history contexts. The LLM is strictly a stateless transition function $\delta(q, s)$ without any memory of previous API calls. 
 
-- **No Hidden Memory**: All state (`q`) and position (`d`) are physically persisted to the disk (in `workspace/.reg_q` and `workspace/.reg_d`).
-- **Prompting / Vision**: The LLM runs at `Temperature 0.0`. It receives the State Register, Head Pointer, and the raw text of the cell (file) it is currently looking at, alongside strict XML instruction discipline.
-- **Tools / Output**: The LLM outputs strict XML tags to transition state (`<STATE>`), move the reader head (`<GOTO>`), write output (`<WRITE>`), erase logs (`<ERASE>`), or execute terminal commands (`<EXEC>`).
+## 🛠️ YOUR ENGINEERING MISSIONS
 
-Any changes you make to the core parser must respect these philosophical bounds: **Do not add memory arrays or abstractions. Rely on the physical tape (file system).**
+Your task is to implement the three interfaces defined in `server/engine.ts` and wire them up in `cli.ts`. Create a folder `server/adapters/` for these implementations.
 
-## 2. Codebase Map
+### Mission 1: The Unix Ontology (`IPhysicalManifold`)
+Create `server/adapters/manifold.ts`.
+- `observe(d: Pointer)`: 
+  - If `d` starts with `./` or `/`, read the local file using `fs/promises`. If it doesn't exist, do not throw an error; return `"[FILE_NOT_FOUND]"`.
+  - If `d` starts with `http://` or `https://`, fetch the webpage and convert it to plain text Markdown.
+  - If `d` starts with `$ ` or `tty://`, execute the command synchronously via `child_process.exec` and return `stdout` + `stderr`. (This is how the AI touches the OS!).
+  - If `d` is `sys://error_recovery`, return a generic empty buffer string.
+- `interfere(d: Pointer, s_prime: Slice)`:
+  - If it's a file path, overwrite the file entirely using `fs/promises.writeFile` (auto-create directories if needed).
+  - If it's a URL or TTY command, throw an error or simply ignore (they are read-only in the action phase).
 
-- `server/engine.ts`: **The Core Engine.** This is the beating heart of TuringClaw. It contains the `TuringClawEngine` class, the `SYSTEM_PROMPT` bounding, the XML parser (`applyDelta`), and the execution loop (`runSimulationLoop`).
-- `tests/simulate_openclaw_v2.ts`: The primary test suite for validating the engine loops. Run with `npx tsx tests/simulate_openclaw_v2.ts`.
-- `workspace/`: The "physical tape" directory where the LLM's state and generated files live.
-- `vite.config.ts`, `server.ts`, `src/`: A React/Express SPA frontend shell surrounding the engine.
+### Mission 2: The Deterministic Collapse (`IOracle`)
+Create `server/adapters/oracle.ts`.
+- Use the OpenAI or Anthropic SDK.
+- **CRITICAL CONSTRAINT**: You MUST set `temperature: 0.0` or as close to zero as possible to enforce absolute determinism (Logic-gate behavior).
+- **Prompt Assembly**: You must concatenate `discipline`, `q`, and `s` into a single, completely stateless system/user prompt.
+- **Output Parsing**: You MUST use OpenAI Structured Outputs (JSON Schema) or Function Calling to force the LLM to output a strict JSON matching the `Transition` interface (`q_next`, `s_prime`, `d_next`). Do not rely on brittle Regex string matching.
 
-## 3. Dual LLM API Support (Important Integration)
+### Mission 3: The Arrow of Time (`IChronos`)
+Create `server/adapters/chronos.ts`.
+- On `engrave(message)`, execute `git add .` followed by `git commit -m "{message}"` via `child_process`. Handle empty commits gracefully. This creates the unforgeable Directed Acyclic Graph (DAG) of the AI's mind.
 
-Recently, the backend was refactored to support **both Kimi (Moonshot) and Google Gemini**.
-The file `server/engine.ts` will route completion requests based on the `process.env.LLM_PROVIDER` environment variable:
+### Mission 4: The CLI Bootstrapper (`cli.ts`)
+- Read `turing_prompt.sh` as the `disciplinePrompt`.
+- Initialize a local `.turing_workspace/` directory. Run `git init` automatically if not present.
+- Instantiate the adapters and call `new TuringEngine(...).ignite(initial_q, initial_d)`.
 
-- `LLM_PROVIDER=kimi` (Default) -> Routes via the OpenAI SDK to `https://api.moonshot.cn/v1` (`moonshot-v1-8k`).
-- `LLM_PROVIDER=gemini` -> Routes via `@google/genai` to `gemini-3.1-pro-preview`.
-
-Ensure any `.env` file you create locally contains **both** `KIMI_API_KEY` and `GEMINI_API_KEY`. The frontend proxy (defined in Vite) is wired to receive both.
-
-## 4. Engineering Directives for Agents
-
-1. **Never mock the Tape**: If you are fixing a bug related to state generation, look at `workspace/.reg_q` or `.reg_d`.
-2. **Observe Strict Discipline**: Changes to the `SYSTEM_PROMPT` in `engine.ts` require rigorous testing, as prompt fragility breaks the Turing completeness of the engine.
-3. **Run Unit Tests First**: Always execute `npx tsx tests/simulate_openclaw_v2.ts` after any major modification to `applyDelta()` or the API fetch cycle.
-
-Good luck! Read the code in `server/engine.ts` if you need to trace the exact XML Regex matchers or hardware init logic before making your changes.
+Acknowledge this Codex by replying: *"I understand. The Kernel is sacred. I will build the universe around it."* and begin Mission 1.
