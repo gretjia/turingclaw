@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { exec } from "child_process";
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
@@ -33,8 +34,9 @@ type TmuxWatcher = {
   pendingLines: string[];
   pendingSinceAt: number;
   lastDigestChangeAt: number;
-  seenLines: string[];
-  seenLineSet: Set<string>;
+  seenLineSigs: string[];
+  seenLineSigSet: Set<string>;
+  recentPayloadSigs: string[];
   busy: boolean;
   errorCount: number;
   lastSentAt: number;
@@ -55,6 +57,7 @@ const TMUX_TAIL_LINES = Number(process.env.TELEGRAM_TMUX_TAIL_LINES || 80);
 const TMUX_MIN_PUSH_SECONDS = Number(process.env.TELEGRAM_TMUX_MIN_PUSH_SECONDS || 5);
 const TMUX_QUIET_SECONDS = Number(process.env.TELEGRAM_TMUX_QUIET_SECONDS || 3);
 const TMUX_MAX_BATCH_SECONDS = Number(process.env.TELEGRAM_TMUX_MAX_BATCH_SECONDS || 15);
+const TMUX_MIN_BATCH_LINES = Number(process.env.TELEGRAM_TMUX_MIN_BATCH_LINES || 2);
 const STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS || 120);
 const HEARTBEAT_SECONDS = Number(process.env.TELEGRAM_HEARTBEAT_SECONDS || 45);
 const MAX_RECOVERY_ATTEMPTS = Number(process.env.TELEGRAM_MAX_RECOVERY_ATTEMPTS || 3);
@@ -207,11 +210,40 @@ function isTransientTmuxLine(rawLine: string): boolean {
   return (
     /^[›❯>]\s/.test(line) ||
     /esc to interrupt\)$/i.test(line) ||
+    /^◦\s/.test(line) ||
+    /^↳\sInteracted with background terminal/i.test(line) ||
+    /^•\sWaiting for /i.test(line) ||
+    /^Planning .* \(\d+s .*interrupt\)$/i.test(line) ||
     line === "› Use /skills to list available skills" ||
     line === "? for shortcuts" ||
     /context left$/i.test(line) ||
     /^─\s*Worked for .*─$/u.test(line)
   );
+}
+
+function canonicalizeLineForDedupe(line: string): string {
+  return line
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, "<iso_ts>")
+    .replace(/\b\d{1,2}:\d{2}:\d{2}\b/g, "<clock>")
+    .replace(/\b\d+(?:\.\d+)?s\b/gi, "<secs>")
+    .replace(/\b\d+%\b/g, "<pct>")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function lineSignature(line: string): string {
+  const normalized = canonicalizeLineForDedupe(line);
+  if (!normalized) return "";
+  return createHash("sha1").update(normalized).digest("hex");
+}
+
+function payloadSignature(lines: string[]): string {
+  const canonical = lines
+    .map((line) => canonicalizeLineForDedupe(line))
+    .filter((line) => line.length > 0)
+    .join("\n");
+  if (!canonical) return "";
+  return createHash("sha1").update(canonical).digest("hex");
 }
 
 function tmuxDigest(snapshot: string): string {
@@ -268,18 +300,19 @@ function appendPendingLines(pending: string[], lines: string[]): string[] {
 
 function markSeenLines(watcher: TmuxWatcher, lines: string[]): void {
   for (const line of lines) {
-    if (!line) continue;
-    if (watcher.seenLineSet.has(line)) continue;
-    watcher.seenLineSet.add(line);
-    watcher.seenLines.push(line);
+    const sig = lineSignature(line);
+    if (!sig) continue;
+    if (watcher.seenLineSigSet.has(sig)) continue;
+    watcher.seenLineSigSet.add(sig);
+    watcher.seenLineSigs.push(sig);
   }
 
   const maxSeen = 4000;
-  if (watcher.seenLines.length > maxSeen) {
-    const removeCount = watcher.seenLines.length - maxSeen;
-    const removed = watcher.seenLines.splice(0, removeCount);
-    for (const line of removed) {
-      watcher.seenLineSet.delete(line);
+  if (watcher.seenLineSigs.length > maxSeen) {
+    const removeCount = watcher.seenLineSigs.length - maxSeen;
+    const removed = watcher.seenLineSigs.splice(0, removeCount);
+    for (const sig of removed) {
+      watcher.seenLineSigSet.delete(sig);
     }
   }
 }
@@ -287,8 +320,9 @@ function markSeenLines(watcher: TmuxWatcher, lines: string[]): void {
 function collectNovelLines(watcher: TmuxWatcher, lines: string[]): string[] {
   const novel: string[] = [];
   for (const line of lines) {
-    if (!line) continue;
-    if (watcher.seenLineSet.has(line)) continue;
+    const sig = lineSignature(line);
+    if (!sig) continue;
+    if (watcher.seenLineSigSet.has(sig)) continue;
     novel.push(line);
   }
   return novel;
@@ -310,6 +344,16 @@ function buildTmuxPush(kind: "started" | "update", target: string, digest: strin
   const maxChars = Math.min(3900, Math.max(1200, OUTPUT_LIMIT));
   const body = clipPreserveTail(digest, Math.max(200, maxChars - header.length));
   return `${header}${body}`;
+}
+
+function appendRecentPayloadSig(watcher: TmuxWatcher, sig: string): void {
+  if (!sig) return;
+  if (watcher.recentPayloadSigs.includes(sig)) return;
+  watcher.recentPayloadSigs.push(sig);
+  const maxRecent = 40;
+  if (watcher.recentPayloadSigs.length > maxRecent) {
+    watcher.recentPayloadSigs.splice(0, watcher.recentPayloadSigs.length - maxRecent);
+  }
 }
 
 function newTaskId(): string {
@@ -981,6 +1025,7 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
           const minGapMs = Math.max(1, TMUX_MIN_PUSH_SECONDS) * 1000;
           const quietMs = Math.max(1, TMUX_QUIET_SECONDS) * 1000;
           const maxBatchMs = Math.max(2, TMUX_MAX_BATCH_SECONDS) * 1000;
+          const minBatchLines = Math.max(1, TMUX_MIN_BATCH_LINES);
 
           if (!sameLines(nextTailLines, live.lastTailLines)) {
             live.lastDigestChangeAt = now;
@@ -999,15 +1044,26 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
           const shouldFlush =
             live.pendingLines.length > 0 &&
             now - live.lastSentAt >= minGapMs &&
-            (now - live.lastDigestChangeAt >= quietMs || pendingAge >= maxBatchMs);
+            (
+              (live.pendingLines.length >= minBatchLines && now - live.lastDigestChangeAt >= quietMs) ||
+              pendingAge >= maxBatchMs
+            );
 
           if (shouldFlush) {
-            live.lastSentAt = now;
-            live.errorCount = 0;
-            const payload = live.pendingLines.slice(-Math.max(20, TMUX_TAIL_LINES)).join("\n");
-            await sendMessage(chatId, buildTmuxPush("update", live.target, payload));
-            live.pendingLines = [];
-            live.pendingSinceAt = 0;
+            const payloadLines = live.pendingLines.slice(-Math.max(20, TMUX_TAIL_LINES));
+            const sig = payloadSignature(payloadLines);
+            if (!sig || live.recentPayloadSigs.includes(sig)) {
+              live.pendingLines = [];
+              live.pendingSinceAt = 0;
+            } else {
+              live.lastSentAt = now;
+              live.errorCount = 0;
+              const payload = payloadLines.join("\n");
+              await sendMessage(chatId, buildTmuxPush("update", live.target, payload));
+              appendRecentPayloadSig(live, sig);
+              live.pendingLines = [];
+              live.pendingSinceAt = 0;
+            }
           }
         } catch (error: any) {
           live.errorCount += 1;
@@ -1026,8 +1082,9 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
     pendingLines: [],
     pendingSinceAt: 0,
     lastDigestChangeAt: Date.now(),
-    seenLines: [...initialTailLines],
-    seenLineSet: new Set(initialTailLines),
+    seenLineSigs: initialTailLines.map((line) => lineSignature(line)).filter(Boolean),
+    seenLineSigSet: new Set(initialTailLines.map((line) => lineSignature(line)).filter(Boolean)),
+    recentPayloadSigs: [],
     busy: false,
     errorCount: 0,
     lastSentAt: Date.now(),
