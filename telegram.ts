@@ -33,6 +33,8 @@ type TmuxWatcher = {
   pendingLines: string[];
   pendingSinceAt: number;
   lastDigestChangeAt: number;
+  seenLines: string[];
+  seenLineSet: Set<string>;
   busy: boolean;
   errorCount: number;
   lastSentAt: number;
@@ -203,6 +205,8 @@ function isTransientTmuxLine(rawLine: string): boolean {
   if (!line) return false;
 
   return (
+    /^[›❯>]\s/.test(line) ||
+    /esc to interrupt\)$/i.test(line) ||
     line === "› Use /skills to list available skills" ||
     line === "? for shortcuts" ||
     /context left$/i.test(line) ||
@@ -246,24 +250,6 @@ function sameLines(a: string[], b: string[]): boolean {
   return true;
 }
 
-function computeAppendedLines(prev: string[], next: string[]): string[] {
-  if (next.length === 0) return [];
-  if (prev.length === 0) return next;
-
-  if (next.length >= prev.length && sameLines(next.slice(0, prev.length), prev)) {
-    return next.slice(prev.length);
-  }
-
-  const maxOverlap = Math.min(prev.length, next.length);
-  for (let k = maxOverlap; k >= 1; k -= 1) {
-    if (sameLines(prev.slice(prev.length - k), next.slice(0, k))) {
-      return next.slice(k);
-    }
-  }
-
-  return [];
-}
-
 function appendPendingLines(pending: string[], lines: string[]): string[] {
   const next = [...pending];
   for (const line of lines) {
@@ -278,6 +264,34 @@ function appendPendingLines(pending: string[], lines: string[]): string[] {
   }
 
   return next;
+}
+
+function markSeenLines(watcher: TmuxWatcher, lines: string[]): void {
+  for (const line of lines) {
+    if (!line) continue;
+    if (watcher.seenLineSet.has(line)) continue;
+    watcher.seenLineSet.add(line);
+    watcher.seenLines.push(line);
+  }
+
+  const maxSeen = 4000;
+  if (watcher.seenLines.length > maxSeen) {
+    const removeCount = watcher.seenLines.length - maxSeen;
+    const removed = watcher.seenLines.splice(0, removeCount);
+    for (const line of removed) {
+      watcher.seenLineSet.delete(line);
+    }
+  }
+}
+
+function collectNovelLines(watcher: TmuxWatcher, lines: string[]): string[] {
+  const novel: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (watcher.seenLineSet.has(line)) continue;
+    novel.push(line);
+  }
+  return novel;
 }
 
 function clipPreserveTail(text: string, maxChars: number): string {
@@ -970,9 +984,10 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
 
           if (!sameLines(nextTailLines, live.lastTailLines)) {
             live.lastDigestChangeAt = now;
-            const appended = computeAppendedLines(live.lastTailLines, nextTailLines);
-            if (appended.length > 0) {
-              live.pendingLines = appendPendingLines(live.pendingLines, appended);
+            const novel = collectNovelLines(live, nextTailLines);
+            if (novel.length > 0) {
+              live.pendingLines = appendPendingLines(live.pendingLines, novel);
+              markSeenLines(live, novel);
               if (live.pendingSinceAt === 0) {
                 live.pendingSinceAt = now;
               }
@@ -1011,6 +1026,8 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
     pendingLines: [],
     pendingSinceAt: 0,
     lastDigestChangeAt: Date.now(),
+    seenLines: [...initialTailLines],
+    seenLineSet: new Set(initialTailLines),
     busy: false,
     errorCount: 0,
     lastSentAt: Date.now(),
