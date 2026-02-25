@@ -59,6 +59,7 @@ const TMUX_QUIET_SECONDS = Number(process.env.TELEGRAM_TMUX_QUIET_SECONDS || 3);
 const TMUX_MAX_BATCH_SECONDS = Number(process.env.TELEGRAM_TMUX_MAX_BATCH_SECONDS || 15);
 const TMUX_MIN_BATCH_LINES = Number(process.env.TELEGRAM_TMUX_MIN_BATCH_LINES || 2);
 const TMUX_TYPING_QUIET_SECONDS = Number(process.env.TELEGRAM_TMUX_TYPING_QUIET_SECONDS || 8);
+const TMUX_SUBMIT_MODE = (process.env.TELEGRAM_TMUX_SUBMIT_MODE || "lf").toLowerCase();
 const AGENT_COLLECT_SECONDS = Number(process.env.TELEGRAM_AGENT_COLLECT_SECONDS || 4);
 const CONFIRM_TTL_SECONDS = Number(process.env.TELEGRAM_CONFIRM_TTL_SECONDS || 180);
 const STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS || 120);
@@ -1251,8 +1252,19 @@ async function sendTmuxInput(target: string, payload: string, pressEnter: boolea
   }
 
   if (pressEnter) {
-    // Send Enter as a separate key event to improve reliability in interactive panes.
-    await runSendKeys(["send-keys", "-t", target, "Enter"]);
+    // Some terminal apps consume CR but submit on LF; default to LF for robustness.
+    if (TMUX_SUBMIT_MODE === "cr") {
+      await runSendKeys(["send-keys", "-t", target, "C-m"]);
+    } else if (TMUX_SUBMIT_MODE === "both") {
+      await runSendKeys(["send-keys", "-t", target, "C-m"]);
+      await runSendKeys(["send-keys", "-t", target, "C-j"]);
+    } else if (TMUX_SUBMIT_MODE === "enter") {
+      await runSendKeys(["send-keys", "-t", target, "Enter"]);
+    } else if (TMUX_SUBMIT_MODE === "literal-lf") {
+      await runSendKeys(["send-keys", "-t", target, "-l", "\n"]);
+    } else {
+      await runSendKeys(["send-keys", "-t", target, "C-j"]);
+    }
   }
 }
 
@@ -1867,7 +1879,11 @@ async function executeTmuxInput(
 ): Promise<void> {
   try {
     await sendTmuxInput(target, payload, pressEnter);
-    await sendMessage(chatNumericId, `tmux input sent\ntarget=${target}\npayload=${payload}\nenter=${pressEnter}`);
+    const submitMode = pressEnter ? TMUX_SUBMIT_MODE : "none";
+    await sendMessage(
+      chatNumericId,
+      `tmux input sent\ntarget=${target}\npayload=${payload}\nenter=${pressEnter}\nsubmit_mode=${submitMode}`
+    );
   } catch (error: any) {
     await sendMessage(chatNumericId, `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown error"}`);
   }
