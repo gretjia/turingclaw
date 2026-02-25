@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
-import type { IOracle, State, Slice, Transition } from '../engine.js';
+import type { IOracle, Pointer, State, Slice, Transition } from '../engine.js';
+import { applyTransitionGuard } from '../control/transition_guard.js';
 
 const TRANSITION_SCHEMA = {
   type: 'object',
@@ -12,10 +13,27 @@ const TRANSITION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-function composeStatelessPrompt(discipline: string, q: State, s: Slice): string {
+function composeStatelessPrompt(discipline: string, q: State, s: Slice, d: Pointer): string {
   return [
     'DISCIPLINE',
     discipline,
+    '',
+    'MACHINE_PROTOCOL',
+    '1) This call is stateless. Use only this prompt contents.',
+    '2) Write side effects always apply to CURRENT_POINTER_D (d_t), never to d_next.',
+    '3) To write file X when CURRENT_POINTER_D is not X:',
+    '   - First emit s_prime=\"👆🏻\" and d_next=\"X\" (navigation step).',
+    '   - On next tick, emit s_prime with file content while CURRENT_POINTER_D is X.',
+    '4) If no write is needed this tick, set s_prime=\"👆🏻\".',
+    '5) If CURRENT_POINTER_D is ./MAIN_TAPE.md and you intentionally write, include [ALLOW_MAIN_TAPE_WRITE] in q_next.',
+    '6) Any requirement in observation marked as \"exact\"/\"exactly\" is mandatory and must be copied verbatim.',
+    '7) Do not invent substitute datasets or filenames; follow the mission text literally.',
+    '8) d_next must be a valid pointer: HALT, sys://error_recovery, ./..., /..., http(s)://..., $ ..., or tty://...',
+    '9) If mission lists numbered required outputs, complete every numbered item before HALT.',
+    '10) HALT only with exact pair: q_next=\"HALT\" and d_next=\"HALT\" after all required artifacts are written.',
+    '',
+    'CURRENT_POINTER_D',
+    d,
     '',
     'CURRENT_STATE_Q',
     q,
@@ -49,8 +67,11 @@ function toTransition(value: unknown): Transition {
 }
 
 function normalizePointer(raw: string): string {
-  const pointer = raw.trim();
-  if (!pointer) return './MAIN_TAPE.md';
+  let pointer = raw.trim();
+  pointer = pointer.replace(/^['"`]+|['"`]+$/g, '').trim();
+  pointer = pointer.replace(/^[<(]+|[)>]+$/g, '').trim();
+  pointer = pointer.replace(/[;,]+$/, '').trim();
+  if (!pointer) return 'sys://trap/invalid_pointer';
 
   if (pointer === 'MAIN_TAPE.md') {
     return './MAIN_TAPE.md';
@@ -79,7 +100,7 @@ function normalizePointer(raw: string): string {
     return pointer;
   }
 
-  return './MAIN_TAPE.md';
+  return 'sys://trap/invalid_pointer';
 }
 
 function extractJsonCandidate(raw: string): string {
@@ -150,6 +171,7 @@ export class StatelessOracle implements IOracle {
   private readonly model: string;
   private readonly timeoutMs: number;
   private readonly usingKimi: boolean;
+  private readonly seed: number | null;
 
   constructor(options: StatelessOracleOptions = {}) {
     const openaiKey = process.env.OPENAI_API_KEY;
@@ -187,10 +209,12 @@ export class StatelessOracle implements IOracle {
     this.timeoutMs =
       options.timeoutMs ??
       (Number.parseInt(process.env.ORACLE_TIMEOUT_MS ?? '', 10) || 90_000);
+    const parsedSeed = Number.parseInt(process.env.ORACLE_SEED ?? '7', 10);
+    this.seed = Number.isFinite(parsedSeed) ? parsedSeed : null;
   }
 
-  public async collapse(discipline: string, q: State, s: Slice): Promise<Transition> {
-    const prompt = composeStatelessPrompt(discipline, q, s);
+  public async collapse(discipline: string, q: State, s: Slice, d: Pointer = './MAIN_TAPE.md'): Promise<Transition> {
+    const prompt = composeStatelessPrompt(discipline, q, s, d);
     let lastError: Error | null = null;
     const attempts = 3;
 
@@ -203,6 +227,9 @@ export class StatelessOracle implements IOracle {
       const request: any = {
         model: this.model,
         temperature: 0,
+        top_p: 0,
+        frequency_penalty: 0,
+        presence_penalty: 0,
         messages: [
           {
             role: 'system',
@@ -228,6 +255,10 @@ export class StatelessOracle implements IOracle {
         },
       };
 
+      if (this.seed !== null) {
+        request.seed = this.seed;
+      }
+
       if (this.usingKimi) {
         request.thinking = { type: 'disabled' };
       }
@@ -245,12 +276,14 @@ export class StatelessOracle implements IOracle {
 
       try {
         if (typeof rawArgs === 'string' && rawArgs.trim()) {
-          return parseTransitionPayload(rawArgs);
+          const parsed = parseTransitionPayload(rawArgs);
+          return applyTransitionGuard(parsed, { currentState: q, currentPointer: d }).transition;
         }
 
         const contentText = messageContentToText(message?.content);
         if (contentText) {
-          return parseTransitionPayload(contentText);
+          const parsed = parseTransitionPayload(contentText);
+          return applyTransitionGuard(parsed, { currentState: q, currentPointer: d }).transition;
         }
 
         throw new Error('Oracle did not return function arguments');
@@ -268,7 +301,7 @@ export class ScriptedOracle implements IOracle {
 
   constructor(private readonly script: Transition[]) {}
 
-  public async collapse(_discipline: string, _q: State, _s: Slice): Promise<Transition> {
+  public async collapse(_discipline: string, _q: State, _s: Slice, _d: Pointer = './MAIN_TAPE.md'): Promise<Transition> {
     if (this.script.length === 0) {
       throw new Error('ScriptedOracle requires at least one scripted transition');
     }

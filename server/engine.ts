@@ -6,6 +6,7 @@
  * ⚠️ THE KERNEL IS IMMUTABLE (架构师最高禁令)
  * 万物皆纸带，状态皆显式，历史皆物理。严禁在此引入任何聊天历史数组或内存缓存。
  */
+import { isHaltLikeState } from './control/halt_protocol.js';
 
 export type State = string;   // q_t: The Soul & Todo-Stack (宏观意图与微观进度)
 export type Pointer = string; // d_t: The Coordinate (文件路径、URL 或 TTY终端命令)
@@ -27,7 +28,7 @@ export interface IPhysicalManifold {
 }
 
 export interface IOracle {
-    collapse(discipline: string, q: State, s: Slice): Promise<Transition>;
+    collapse(discipline: string, q: State, s: Slice, d?: Pointer): Promise<Transition>;
 }
 
 export interface IChronos {
@@ -54,7 +55,7 @@ export class TuringEngine {
         const s_t = await this.manifold.observe(d_t);
 
         // 2. 理性坍缩 (C_Think): 神谕机执行确定性状态转移 δ(<P, q> ⊗ s)
-        const { q_next, s_prime, d_next } = await this.oracle.collapse(this.disciplinePrompt, q_t, s_t);
+        const { q_next, s_prime, d_next } = await this.oracle.collapse(this.disciplinePrompt, q_t, s_t, d_t);
 
         // 3. 物理干涉 (W_Act): 若算子不为 '👆🏻'，则对当前坐标施加不可逆的副作用
         if (s_prime.trim() !== '👆🏻') {
@@ -81,7 +82,7 @@ export class TuringEngine {
         while (true) {
             epoch++;
             // 停机渊薮 (The Halting Abyss)
-            if (d === "HALT" || q.trim() === "HALT" || q.includes("[HALT]")) {
+            if (d === "HALT" || isHaltLikeState(q)) {
                 console.log(`⏹️ [HALT] The Machine has found its peace at Epoch ${epoch}.`);
                 break;
             }

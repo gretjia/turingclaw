@@ -1,0 +1,40 @@
+{
+  "id": "swe_control",
+  "maxTicks": 45,
+  "initialQ": "q_0: FIX_AND_VERIFY",
+  "initialD": "./MAIN_TAPE.md",
+  "mainTape": "# Mission: SWE Control\nGoal: make test_calculator.js pass and then HALT.\nExecution protocol is mandatory:\n1) Navigate to ./calculator.js with s_prime='👆🏻', then patch multiply to return a * b.\n2) Navigate to shell pointer $ node ./test_calculator.js and execute it.\n3) If output contains PASS, navigate to ./result/RESULT.json and write exactly:\n{\"scenario\":\"swe\",\"status\":\"done\",\"tests\":\"pass\"}\n4) Emit final transition q_next=HALT, s_prime='👆🏻', d_next=HALT.\nDo not stop before step 3 is physically written.",
+  "setupFiles": [
+    {
+      "path": "calculator.js",
+      "content": "export function add(a, b) { return a + b; }\nexport function multiply(a, b) { return a + b; // BUG }"
+    },
+    {
+      "path": "test_calculator.js",
+      "content": "import { multiply } from './calculator.js';\nconst out = multiply(3, 4);\nif (out !== 12) {\n  console.error('FAIL:' + out);\n  process.exit(1);\n}\nconsole.log('PASS');"
+    }
+  ],
+  "checks": [
+    {
+      "kind": "json",
+      "path": "result/RESULT.json",
+      "expected": {
+        "scenario": "swe",
+        "status": "done",
+        "tests": "pass"
+      }
+    }
+  ],
+  "postCheck": {
+    "type": "command",
+    "command": "node ./test_calculator.js",
+    "expectContains": "PASS",
+    "expectExitCode": 0
+  },
+  "completion": {
+    "requireHalt": true,
+    "requireNoAnomalies": true,
+    "requireAllChecks": true,
+    "requirePostCheck": true
+  }
+}

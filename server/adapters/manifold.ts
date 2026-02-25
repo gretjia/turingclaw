@@ -16,6 +16,10 @@ function isShellPointer(pointer: string): boolean {
   return pointer.startsWith('$ ') || pointer.startsWith('tty://');
 }
 
+function isTrapPointer(pointer: string): boolean {
+  return pointer.startsWith('sys://trap/');
+}
+
 function toCommand(pointer: string): string {
   if (pointer.startsWith('$ ')) return pointer.slice(2);
   if (pointer.startsWith('tty://')) return pointer.slice('tty://'.length);
@@ -57,27 +61,55 @@ function toAbsolutePath(pointer: string, cwd: string): string {
   return isAbsolute(pointer) ? pointer : resolve(cwd, pointer);
 }
 
+function isMainTapePointer(pointer: string): boolean {
+  const normalized = pointer.trim();
+  return normalized === './MAIN_TAPE.md' || normalized === 'MAIN_TAPE.md';
+}
+
+export interface UnixPhysicalManifoldOptions {
+  attachMainTapeContext?: boolean;
+  mainTapeFile?: string;
+}
+
 export class UnixPhysicalManifold implements IPhysicalManifold {
-  constructor(private readonly cwd: string = process.cwd()) {}
+  private readonly attachMainTapeContext: boolean;
+  private readonly mainTapeFile: string;
+
+  constructor(
+    private readonly cwd: string = process.cwd(),
+    options: UnixPhysicalManifoldOptions = {},
+  ) {
+    this.attachMainTapeContext =
+      options.attachMainTapeContext ??
+      process.env.TURING_ATTACH_MAIN_TAPE_CONTEXT === '1';
+    this.mainTapeFile = options.mainTapeFile ?? 'MAIN_TAPE.md';
+  }
 
   public async observe(d: Pointer): Promise<Slice> {
     if (d === 'sys://error_recovery') {
       return '';
     }
+    if (isTrapPointer(d)) {
+      return `[TRAP_POINTER] ${d}`;
+    }
 
+    let baseSlice: string;
     if (isUrlPointer(d)) {
-      return this.observeUrl(d);
+      baseSlice = await this.observeUrl(d);
+      return this.withMainTapeContext(d, baseSlice);
     }
 
     if (isShellPointer(d)) {
-      return this.observeShell(d);
+      baseSlice = await this.observeShell(d);
+      return this.withMainTapeContext(d, baseSlice);
     }
 
-    return this.observeFile(d);
+    baseSlice = await this.observeFile(d);
+    return this.withMainTapeContext(d, baseSlice);
   }
 
   public async interfere(d: Pointer, s_prime: Slice): Promise<void> {
-    if (isUrlPointer(d) || isShellPointer(d) || d === 'sys://error_recovery') {
+    if (isUrlPointer(d) || isShellPointer(d) || d === 'sys://error_recovery' || isTrapPointer(d)) {
       return;
     }
 
@@ -133,5 +165,34 @@ export class UnixPhysicalManifold implements IPhysicalManifold {
       if (output) return output;
       return `[COMMAND_FAILED] ${error?.message ?? 'Unknown command execution failure'}`;
     }
+  }
+
+  private async withMainTapeContext(pointer: string, slice: string): Promise<string> {
+    if (!this.attachMainTapeContext) return slice;
+    if (isMainTapePointer(pointer)) return slice;
+    if (isTrapPointer(pointer)) return slice;
+    if (pointer === 'sys://error_recovery') return slice;
+
+    const mainTapePath = toAbsolutePath(this.mainTapeFile, this.cwd);
+    let mainTape = '';
+    try {
+      mainTape = await readFile(mainTapePath, 'utf8');
+    } catch {
+      return slice;
+    }
+
+    const normalizedTape = mainTape.trim();
+    if (!normalizedTape) return slice;
+
+    return [
+      '[MAIN_TAPE_CONTEXT]',
+      normalizedTape,
+      '',
+      '[CURRENT_POINTER_D]',
+      pointer,
+      '',
+      '[CURRENT_OBSERVATION_S]',
+      slice,
+    ].join('\n');
   }
 }

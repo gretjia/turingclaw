@@ -1,0 +1,40 @@
+{
+  "id": "pipeline_control",
+  "maxTicks": 40,
+  "initialQ": "q_0: SYSTEM_BOOTING",
+  "initialD": "./MAIN_TAPE.md",
+  "mainTape": "# Mission: Pipeline Control\nComplete all outputs exactly and then HALT.\nOnly use relative file pointers, shell pointers ($ ...), or HALT.\nRequired outputs:\n1) artifacts/input.csv exactly:\nid,value\na,10\nb,40\nc,70\nd,100\n2) artifacts/high.csv exactly rows with value >= 70:\nid,value\nc,70\nd,100\n3) artifacts/sum.txt exactly: 220\n4) result/RESULT.json exactly keys and values:\n{\"scenario\":\"pipeline\",\"status\":\"done\",\"sum\":220,\"high_rows\":2}\nWhen all done set q_next=HALT and d_next=HALT.",
+  "checks": [
+    {
+      "kind": "text",
+      "path": "artifacts/input.csv",
+      "exact": "id,value\na,10\nb,40\nc,70\nd,100"
+    },
+    {
+      "kind": "text",
+      "path": "artifacts/high.csv",
+      "exact": "id,value\nc,70\nd,100"
+    },
+    {
+      "kind": "text",
+      "path": "artifacts/sum.txt",
+      "exact": "220"
+    },
+    {
+      "kind": "json",
+      "path": "result/RESULT.json",
+      "expected": {
+        "scenario": "pipeline",
+        "status": "done",
+        "sum": 220,
+        "high_rows": 2
+      }
+    }
+  ],
+  "completion": {
+    "requireHalt": true,
+    "requireNoAnomalies": true,
+    "requireAllChecks": true,
+    "requirePostCheck": false
+  }
+}

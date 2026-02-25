@@ -7,6 +7,7 @@ import { TuringEngine, type IOracle, type IPhysicalManifold, type Pointer, type 
 import { UnixPhysicalManifold } from './adapters/manifold.js';
 import { StatelessOracle } from './adapters/oracle.js';
 import { GitChronos } from './adapters/chronos.js';
+import { ProgressWatchdog, watchdogRecoveryState } from './control/progress_watchdog.js';
 import { loadDisciplineFromFile } from './discipline.js';
 
 export type RuntimeStatus = 'idle' | 'running' | 'error';
@@ -36,6 +37,8 @@ function isUrlPointer(pointer: string): boolean {
 }
 
 class RegisteringOracle implements IOracle {
+  private readonly watchdog = new ProgressWatchdog();
+
   constructor(
     private readonly inner: IOracle,
     private readonly qPath: string,
@@ -43,10 +46,16 @@ class RegisteringOracle implements IOracle {
     private readonly onState: (q: string, d: string) => Promise<void>,
   ) {}
 
-  public async collapse(discipline: string, q: State, s: Slice): Promise<Transition> {
-    const transition = await this.inner.collapse(discipline, q, s);
-    const qNext = transition.q_next.trim() || DEFAULT_Q;
-    const dNext = transition.d_next.trim() || DEFAULT_D;
+  public async collapse(discipline: string, q: State, s: Slice, d: Pointer = DEFAULT_D): Promise<Transition> {
+    const transition = await this.inner.collapse(discipline, q, s, d);
+    let qNext = transition.q_next.trim() || DEFAULT_Q;
+    let dNext = transition.d_next.trim() || DEFAULT_D;
+
+    const watch = this.watchdog.inspect(qNext, dNext);
+    if (watch.triggered) {
+      qNext = watchdogRecoveryState(watch.reason ?? 'window_repeat', watch.fingerprint, qNext);
+      dNext = 'sys://error_recovery';
+    }
 
     await writeFile(this.qPath, `${qNext}\n`, 'utf8');
     await writeFile(this.dPath, `${dNext}\n`, 'utf8');
@@ -282,7 +291,7 @@ export class TuringRuntime extends EventEmitter {
       ]);
 
       const manifold = new BroadcastingManifold(
-        new UnixPhysicalManifold(this.workspaceDir),
+        new UnixPhysicalManifold(this.workspaceDir, { attachMainTapeContext: true }),
         async (pointer: Pointer) => {
           if (this.isMainTapePointer(pointer)) {
             await this.broadcastTape();

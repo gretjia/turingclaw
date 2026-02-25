@@ -1,0 +1,40 @@
+{
+  "id": "fault_recovery_control",
+  "maxTicks": 50,
+  "initialQ": "q_0: RECOVER_AND_COMPLETE",
+  "initialD": "./inputs/source.txt",
+  "mainTape": "# Mission: Fault Recovery Control\nInitial observation may be [FILE_NOT_FOUND]. Recover and complete without manual help.\nCreate outputs exactly then HALT:\n1) inputs/source.txt lines: red, green, blue\n2) outputs/colors_upper.txt lines: RED, GREEN, BLUE\n3) outputs/count.txt exactly: 3\n4) result/RESULT.json = {\"scenario\":\"recovery\",\"status\":\"done\",\"recovered\":true,\"count\":3}\nThen q_next=HALT and d_next=HALT.",
+  "checks": [
+    {
+      "kind": "text",
+      "path": "inputs/source.txt",
+      "exact": "red\ngreen\nblue"
+    },
+    {
+      "kind": "text",
+      "path": "outputs/colors_upper.txt",
+      "exact": "RED\nGREEN\nBLUE"
+    },
+    {
+      "kind": "text",
+      "path": "outputs/count.txt",
+      "exact": "3"
+    },
+    {
+      "kind": "json",
+      "path": "result/RESULT.json",
+      "expected": {
+        "scenario": "recovery",
+        "status": "done",
+        "recovered": true,
+        "count": 3
+      }
+    }
+  ],
+  "completion": {
+    "requireHalt": true,
+    "requireNoAnomalies": true,
+    "requireAllChecks": true,
+    "requirePostCheck": false
+  }
+}
