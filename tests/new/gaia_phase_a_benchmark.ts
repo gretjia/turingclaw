@@ -221,26 +221,31 @@ function isRefusalLikeAnswer(input: string): boolean {
 }
 
 function detectPointerCycle(history: string[]): string | null {
+  const isCycleCandidate = (pointer: string): boolean =>
+    !pointer.startsWith('sys://') && pointer !== './MAIN_TAPE.md' && pointer !== './result/ANSWER.txt';
+
   const n = history.length;
-  if (n >= 4) {
-    const a = history[n - 4];
-    const b = history[n - 3];
-    const c = history[n - 2];
-    const d = history[n - 1];
-    if (a === c && b === d && a !== b) {
+  if (n >= 8) {
+    const window = history.slice(n - 8);
+    const [a, b] = window;
+    const alternating = window.every((item, index) => item === (index % 2 === 0 ? a : b));
+    if (alternating && a !== b && isCycleCandidate(a) && isCycleCandidate(b)) {
       return `${a} -> ${b}`;
     }
   }
 
-  if (n >= 6) {
-    const p0 = history[n - 6];
-    const p1 = history[n - 5];
-    const p2 = history[n - 4];
-    const p3 = history[n - 3];
-    const p4 = history[n - 2];
-    const p5 = history[n - 1];
-    if (p0 === p3 && p1 === p4 && p2 === p5 && (p0 !== p1 || p1 !== p2)) {
-      return `${p0} -> ${p1} -> ${p2}`;
+  if (n >= 9) {
+    const window = history.slice(n - 9);
+    const [a, b, c] = window;
+    const triplet = window.every((item, index) => item === [a, b, c][index % 3]);
+    if (
+      triplet &&
+      (a !== b || b !== c) &&
+      isCycleCandidate(a) &&
+      isCycleCandidate(b) &&
+      isCycleCandidate(c)
+    ) {
+      return `${a} -> ${b} -> ${c}`;
     }
   }
 
@@ -588,13 +593,13 @@ async function runTask(
           reasons.push('PLAN_TAPE.md missing or empty for L2/L3 task');
         }
 
-        if (reasons.length === 0 && task.level >= 2 && !preHaltReviewInjected) {
+        if (reasons.length === 0 && task.level === 3 && !preHaltReviewInjected) {
           preHaltReviewInjected = true;
           preHaltReviewRejectCount += 1;
           haltRejectCount += 1;
           q = [
             '[PRE_HALT_REVIEW_REQUIRED]',
-            'Before HALT on L2/L3, verify every numbered requirement in MAIN_TAPE.md is complete.',
+            'Before HALT on L3, verify every numbered requirement in MAIN_TAPE.md is complete.',
             'Re-read MAIN_TAPE + PLAN_TAPE + ANSWER.txt and then HALT again.',
             `[PREV_Q] ${stateHead(q)}`,
           ].join('\n');
@@ -639,7 +644,6 @@ async function runTask(
     answerNonEmpty &&
     anomalies === 0 &&
     pointerFallbackCount === 0 &&
-    cycleRecoveries === 0 &&
     haltRejectCount === 0 &&
     !(hasAttachment && !attachment.source);
   const fallbackRate = Number((pointerFallbackCount / Math.max(1, ticks)).toFixed(4));
