@@ -133,15 +133,15 @@ function tmuxWatcherKey(chatId: number | string): string {
 function sanitizeTmuxTarget(raw: string): string | null {
   const candidate = raw.trim();
   if (!candidate) return null;
-  if (!/^[A-Za-z0-9:_-]{1,64}$/.test(candidate)) return null;
+  if (!/^[A-Za-z0-9:_.%+-]{1,64}$/.test(candidate)) return null;
   return candidate;
 }
 
 function extractTmuxTarget(text: string): string | null {
   const patterns = [
-    /tmux\s+attach(?:-session)?\s+-t\s+([A-Za-z0-9:_-]+)/i,
-    /tmux\s+capture-pane\s+-pt\s+([A-Za-z0-9:_-]+)/i,
-    /attach\s+-t\s+([A-Za-z0-9:_-]+)/i,
+    /tmux\s+attach(?:-session)?\s+-t\s+([A-Za-z0-9:_.%+-]+)/i,
+    /tmux\s+capture-pane\s+-pt\s+([A-Za-z0-9:_.%+-]+)/i,
+    /attach\s+-t\s+([A-Za-z0-9:_.%+-]+)/i,
   ];
 
   for (const pattern of patterns) {
@@ -190,14 +190,35 @@ function stripAnsi(input: string): string {
   return input.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
 }
 
+function isTransientTmuxLine(rawLine: string): boolean {
+  const line = rawLine.trim();
+  if (!line) return false;
+
+  return (
+    line === "› Use /skills to list available skills" ||
+    line === "? for shortcuts" ||
+    /context left$/i.test(line) ||
+    /^─\s*Worked for .*─$/u.test(line)
+  );
+}
+
 function tmuxDigest(snapshot: string): string {
   const normalized = stripAnsi(snapshot)
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.replace(/\s+$/g, ""))
+    .filter((line) => !isTransientTmuxLine(line))
     .join("\n")
     .trim();
-  return tailText(normalized, Math.max(20, TMUX_TAIL_LINES));
+
+  const tail = tailText(normalized, Math.max(20, TMUX_TAIL_LINES));
+  const deduped: string[] = [];
+  for (const line of tail.split("\n")) {
+    if (deduped.length === 0 || deduped[deduped.length - 1] !== line) {
+      deduped.push(line);
+    }
+  }
+  return deduped.join("\n").trim();
 }
 
 function clipPreserveTail(text: string, maxChars: number): string {
