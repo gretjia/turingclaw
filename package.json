@@ -10,7 +10,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "start": "node server.ts",
-    "cli": "tsx cli.ts"
+    "cli": "tsx cli.ts",
+    "telegram": "tsx telegram.ts"
   },
   "dependencies": {
     "@google/genai": "^1.42.0",

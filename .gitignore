@@ -6,7 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
-.handover/
 
 # TuringClaw Workspaces and Tape Memory
 workspace/
@@ -16,3 +15,7 @@ MAIN_TAPE.md
 .reg_d
 .tmp_prompt.txt
 WATCHDOG_LOG.md
+.telegram/
+
+# Agent handover: keep local machine notes untracked
+.handover/local/

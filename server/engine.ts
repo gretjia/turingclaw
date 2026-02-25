@@ -2,6 +2,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
+import crypto from 'crypto';
 import OpenAI from 'openai';
 import { GoogleGenAI } from '@google/genai';
 import { WebSocketServer } from 'ws';
@@ -24,7 +25,20 @@ const gemini = new GoogleGenAI({
 const WORKSPACE_DIR = process.env.TURINGCLAW_WORKSPACE || path.join(process.cwd(), 'workspace');
 const FILE_Q = path.join(WORKSPACE_DIR, '.reg_q');
 const FILE_D = path.join(WORKSPACE_DIR, '.reg_d');
+const FILE_NOTEBOOK = path.join(WORKSPACE_DIR, '.reg_notebook');
+const FILE_REQ_ID = path.join(WORKSPACE_DIR, '.reg_req_id');
+const FILE_EXEC_AUDIT = path.join(WORKSPACE_DIR, '.reg_exec_audit');
 const MAX_STDOUT = 1500;
+const SEMANTIC_STALL_LIMIT = parsePositiveInt(process.env.TURINGCLAW_SEMANTIC_STALL_LIMIT, 20);
+const SEMANTIC_STALL_WINDOW = Math.max(SEMANTIC_STALL_LIMIT * 3, 30);
+const STRICT_EXEC_GUARD = process.env.TURINGCLAW_STRICT_EXEC_GUARD !== '0';
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
 
 const SYSTEM_PROMPT = `# 核心角色 (The Core Directive)
 You are the **Transition Function $\\delta$** of a Universal AI Turing Machine. 
@@ -57,10 +71,237 @@ export class TuringClawEngine {
     this.initHardware();
   }
 
+  private isProtectedPath(dPath: string): boolean {
+    const normalized = path.posix.normalize(dPath.split(path.sep).join('/')).replace(/^\.\/+/, '');
+    const segments = normalized.split('/').filter(Boolean);
+    return segments.some(seg => seg.startsWith('.reg_'));
+  }
+
+  private isValidRelativeTapePath(dPath: string): boolean {
+    if (!dPath || path.isAbsolute(dPath)) return false;
+    // Block parent traversal to keep the head inside workspace.
+    if (dPath.split('/').includes('..') || dPath.split(path.sep).includes('..')) return false;
+    // Protect internal registers from model-controlled reads/writes.
+    if (this.isProtectedPath(dPath)) return false;
+    return true;
+  }
+
+  private resolveTapePath(dPath: string): string | null {
+    if (!this.isValidRelativeTapePath(dPath)) return null;
+    const workspaceReal = fs.realpathSync.native(WORKSPACE_DIR);
+    const candidateAbs = path.resolve(WORKSPACE_DIR, dPath);
+    const inWorkspace = candidateAbs === workspaceReal || candidateAbs.startsWith(`${workspaceReal}${path.sep}`);
+    if (!inWorkspace) return null;
+
+    // Block symlink escapes: every existing ancestor must still resolve inside workspace.
+    let probe = candidateAbs;
+    while (probe !== workspaceReal) {
+      if (fs.existsSync(probe)) {
+        const probeReal = fs.realpathSync.native(probe);
+        const probeInside = probeReal === workspaceReal || probeReal.startsWith(`${workspaceReal}${path.sep}`);
+        if (!probeInside) return null;
+      }
+      const parent = path.dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+    return candidateAbs;
+  }
+
+  private buildSemanticFingerprint(q: string, d: string, s: string, n: string): string {
+    // Use file identity/version to detect real progress even when edits occur outside displayed tails.
+    const tapeVersion = this.getRelativePathVersion(d);
+    const notebookVersion = this.getAbsolutePathVersion(FILE_NOTEBOOK);
+    const previewTail = s.slice(-800);
+    const notebookTail = n.slice(-400);
+    return `${q}\n${d}\n${tapeVersion}\n${notebookVersion}\n${previewTail}\n${notebookTail}`;
+  }
+
+  private getRelativePathVersion(dPath: string): string {
+    const fullPath = this.resolveTapePath(dPath);
+    if (!fullPath) return `invalid:${dPath}`;
+    return this.getAbsolutePathVersion(fullPath);
+  }
+
+  private getAbsolutePathVersion(fullPath: string): string {
+    if (!fs.existsSync(fullPath)) return 'missing';
+    const stats = fs.statSync(fullPath);
+    if (stats.isDirectory()) return `dir:${stats.size}`;
+    const content = fs.readFileSync(fullPath);
+    const digest = crypto.createHash('sha1').update(content).digest('hex');
+    return `file:${stats.size}:${digest}`;
+  }
+
+  private getCurrentRequestId(): number {
+    if (!fs.existsSync(FILE_REQ_ID)) return 0;
+    const raw = fs.readFileSync(FILE_REQ_ID, 'utf-8').trim();
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) return 0;
+    return parsed;
+  }
+
+  private setCurrentRequestId(requestId: number) {
+    fs.writeFileSync(FILE_REQ_ID, String(Math.max(0, requestId)), 'utf-8');
+  }
+
+  private readExecAudit(): {
+    requestId: number;
+    status: 'ok' | 'error' | 'none';
+    cmd: string;
+    at: string;
+    verified: boolean;
+    outputTail: string;
+  } {
+    if (!fs.existsSync(FILE_EXEC_AUDIT)) {
+      return { requestId: 0, status: 'none', cmd: '', at: '', verified: false, outputTail: '' };
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(FILE_EXEC_AUDIT, 'utf-8'));
+      if (!parsed || typeof parsed !== 'object') throw new Error('bad payload');
+      return {
+        requestId: Number.isFinite(parsed.requestId) ? parsed.requestId : 0,
+        status: parsed.status === 'ok' || parsed.status === 'error' ? parsed.status : 'none',
+        cmd: typeof parsed.cmd === 'string' ? parsed.cmd : '',
+        at: typeof parsed.at === 'string' ? parsed.at : '',
+        verified: parsed.verified === true,
+        outputTail: typeof parsed.outputTail === 'string' ? parsed.outputTail : '',
+      };
+    } catch {
+      return { requestId: 0, status: 'none', cmd: '', at: '', verified: false, outputTail: '' };
+    }
+  }
+
+  private isTrivialCommand(cmd: string): boolean {
+    return /^(echo|true|pwd|ls|cat)(\s|$)/i.test(cmd.trim());
+  }
+
+  private isVerificationCommand(cmd: string): boolean {
+    return /\b(pytest|jest|vitest|mocha|unittest|go test|cargo test|npm test|pnpm test|yarn test|ctest|lint|check|verify|validate|smoke|benchmark|build\.sh|deploy_database\.sh|philosophers\.py|db_ready\.txt)\b/i.test(cmd);
+  }
+
+  private hasVerificationSignal(output: string): boolean {
+    return /(ALL TESTS PASSED|TESTS PASSED|SUCCESS:|PASSED|VALIDATED|100% PASS|DATABASE_IS_READY|ALL PHILOSOPHERS FINISHED EATING)/i.test(output);
+  }
+
+  private hasPathEscapeRisk(cmd: string): boolean {
+    const parts = cmd.match(/"[^"]*"|'[^']*'|\S+/g) || [];
+    for (let i = 0; i < parts.length; i++) {
+      const raw = parts[i];
+      const token = raw.replace(/^['"]|['"]$/g, '');
+      if (!token || token.startsWith('-')) continue;
+      // Keep kimi prompt text free-form while still validating executable/flags.
+      if (parts[0] === 'kimi' && i >= 3) continue;
+      if (token.startsWith('/')) return true;
+      if (token.includes('\\')) return true;
+      if (token === '..' || token.startsWith('../') || token.includes('/../') || token.endsWith('/..')) return true;
+    }
+    return false;
+  }
+
+  private isExecCommandAllowed(cmd: string): boolean {
+    if (!STRICT_EXEC_GUARD) return true;
+    const normalized = cmd.trim();
+    // Basic shell hardening: reject obvious command chaining and absolute-path execution.
+    if (/[|;&<>`]/.test(normalized) || /[$]\(|\n/.test(normalized)) return false;
+    if (this.hasPathEscapeRisk(normalized)) return false;
+    if (/(^|[\s;&|])(rm\s+-rf\s+\/|mkfs|shutdown|reboot|poweroff|halt)([\s;&|]|$)/i.test(normalized)) return false;
+    if (/curl\s+[^|]*\|\s*(bash|sh)\b/i.test(normalized)) return false;
+    if (/wget\s+[^|]*\|\s*(bash|sh)\b/i.test(normalized)) return false;
+    if (/\b(sudo|ssh|scp|sftp|nc|ncat|telnet|nmap)\b/i.test(normalized)) return false;
+    const allowlist = [
+      /^(npm|pnpm|yarn)\s+(test|run\s+[a-zA-Z0-9:_-]+)$/,
+      /^pytest(\s+[\w./:=,-]+)?$/,
+      /^python3?\s+[\w./-]+(\s+[\w./:=,-]+)*$/,
+      /^go\s+test(\s+[\w./:=,-]+)*$/,
+      /^cargo\s+test(\s+[\w./:=,-]+)*$/,
+      /^\.[/][\w./-]+(\s+[\w./:=,-]+)*$/,
+      /^cat\s+[\w./-]+$/,
+      /^kimi\s+-y\s+-p\s+["'][^"'`$|;&<>]+["']$/,
+      /^sleep\s+\d+$/,
+      /^ls(\s+[\w./-]+)?$/,
+      /^pwd$/,
+      /^echo(\s+[\w ./,:=_-]+)?$/,
+    ];
+    if (!allowlist.some((re) => re.test(normalized))) return false;
+    return true;
+  }
+
+  private invalidateExecAudit(requestId: number) {
+    if (this.getCurrentRequestId() !== requestId) return;
+    const current = this.readExecAudit();
+    fs.writeFileSync(
+      FILE_EXEC_AUDIT,
+      JSON.stringify({
+        requestId,
+        status: 'none',
+        cmd: current.cmd,
+        at: new Date().toISOString(),
+        verified: false,
+        outputTail: '',
+      }),
+      'utf-8'
+    );
+  }
+
+  private writeExecAudit(
+    requestId: number,
+    status: 'ok' | 'error',
+    cmd: string,
+    outputTail: string,
+  ) {
+    if (this.getCurrentRequestId() !== requestId) return;
+    const verified = status === 'ok'
+      && !this.isTrivialCommand(cmd)
+      && this.isVerificationCommand(cmd)
+      && this.hasVerificationSignal(outputTail);
+    const payload = {
+      requestId: Math.max(0, requestId),
+      status,
+      cmd: cmd.slice(0, 80),
+      at: new Date().toISOString(),
+      verified,
+      outputTail: outputTail.slice(-1200),
+    };
+    fs.writeFileSync(FILE_EXEC_AUDIT, JSON.stringify(payload), 'utf-8');
+  }
+
+  private truncateForTape(text: string, max: number): string {
+    if (text.length <= max) return text;
+    const head = Math.floor(max * 0.6);
+    const tail = max - head;
+    return `${text.slice(0, head)}\n...[TRUNCATED ${text.length - max} chars]...\n${text.slice(-tail)}`;
+  }
+
+  private haltGateSatisfied(_targetFile: string, requestId: number): boolean {
+    if (this.getCurrentRequestId() !== requestId) return false;
+    const audit = this.readExecAudit();
+    if (audit.requestId !== requestId || audit.status !== 'ok') return false;
+
+    const requiredPattern = process.env.TURINGCLAW_HALT_REQUIRE;
+    if (requiredPattern) {
+      try {
+        return new RegExp(requiredPattern, 'i').test(`${audit.cmd}\n${audit.outputTail}`);
+      } catch {
+        return false;
+      }
+    }
+
+    // Default gate: require engine-authored successful EXEC with verification evidence.
+    return audit.verified === true;
+  }
+
   private initHardware() {
     if (!fs.existsSync(WORKSPACE_DIR)) fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
     if (!fs.existsSync(FILE_Q)) this.setQ("q_0: SYSTEM_BOOTING");
     if (!fs.existsSync(FILE_D)) this.setD("MAIN_TAPE.md");
+    if (!fs.existsSync(FILE_REQ_ID)) this.setCurrentRequestId(0);
+    if (!fs.existsSync(FILE_EXEC_AUDIT)) {
+      fs.writeFileSync(
+        FILE_EXEC_AUDIT,
+        JSON.stringify({ requestId: 0, status: 'none', cmd: '', at: '', verified: false, outputTail: '' }),
+        'utf-8'
+      );
+    }
   }
 
   public getQ(): string { return fs.readFileSync(FILE_Q, 'utf-8').trim(); }
@@ -68,8 +309,22 @@ export class TuringClawEngine {
   public getD(): string { return fs.readFileSync(FILE_D, 'utf-8').trim(); }
   public setD(d: string) { fs.writeFileSync(FILE_D, d.trim(), 'utf-8'); }
 
+  public getNotebook(): string {
+    if (!fs.existsSync(FILE_NOTEBOOK)) return "";
+    return fs.readFileSync(FILE_NOTEBOOK, 'utf-8').trim();
+  }
+  public appendNotebook(text: string) {
+    fs.appendFileSync(FILE_NOTEBOOK, `\n${text.trim()}\n`, 'utf-8');
+  }
+
   public readCellS(dPath: string): string {
-    const fullPath = path.join(WORKSPACE_DIR, dPath);
+    const fullPath = this.resolveTapePath(dPath);
+    if (!fullPath) {
+      return `[DISCIPLINE ERROR: Invalid head pointer '${dPath}'. Use only relative file paths inside workspace.]`;
+    }
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
+      return `[DISCIPLINE ERROR: Head pointer '${dPath}' points to a directory. Move to a file cell.]`;
+    }
     if (!fs.existsSync(fullPath)) {
       return `[BLANK CELL: File '${dPath}' is empty or does not exist.]`;
     }
@@ -83,7 +338,7 @@ export class TuringClawEngine {
         const numHidden = lines.length - MAX_LINES;
         const truncatedLines = [
             ...head,
-            `\n[SYSTEM: TAPE TOO LONG. MIDDLE ${numHidden} LINES HIDDEN. YOU MUST USE <ERASE> TO FREE UP SPACE]\n`,
+            `[SYSTEM: TAPE TOO LONG. MIDDLE ${numHidden} LINES HIDDEN. YOU MUST USE <ERASE> TO FREE UP SPACE]`,
             ...tail
         ];
         return truncatedLines.map((line, i) => {
@@ -117,9 +372,23 @@ export class TuringClawEngine {
 
   public async addUserMessage(message: string) {
     const d = this.getD();
-    const targetFile = path.join(WORKSPACE_DIR, d);
+    const targetFile = this.resolveTapePath(d) || path.join(WORKSPACE_DIR, "MAIN_TAPE.md");
     fs.mkdirSync(path.dirname(targetFile), { recursive: true });
     fs.appendFileSync(targetFile, `\n[USER REQUEST]: ${message}\n`, 'utf-8');
+    const nextRequestId = this.getCurrentRequestId() + 1;
+    this.setCurrentRequestId(nextRequestId);
+    fs.writeFileSync(
+      FILE_EXEC_AUDIT,
+      JSON.stringify({
+        requestId: nextRequestId,
+        status: 'none',
+        cmd: '',
+        at: new Date().toISOString(),
+        verified: false,
+        outputTail: '',
+      }),
+      'utf-8'
+    );
 
     const q = this.getQ();
     if (q === "HALT" || q === "q_0: SYSTEM_BOOTING") {
@@ -141,6 +410,10 @@ export class TuringClawEngine {
     console.log(`⚙️ AI Turing Machine Started [${LLM_PROVIDER} MODE]. Executing formal δ(q,s) loop...`);
 
     let recentOutputs: string[] = [];
+    let lastSemanticFingerprint = '';
+    let semanticStallCount = 0;
+    const recentFingerprints: string[] = [];
+    const recentStatePairs: string[] = [];
 
     try {
       while (true) {
@@ -148,7 +421,39 @@ export class TuringClawEngine {
         // The loop is strictly blocking and deterministic. No Promise.all or floating async calls allowed.
         const q = this.getQ();
         const d = this.getD();
+        const requestId = this.getCurrentRequestId();
+        const n = this.getNotebook();
         const s = this.readCellS(d);
+        const semanticFingerprint = this.buildSemanticFingerprint(q, d, s, n);
+        if (semanticFingerprint === lastSemanticFingerprint) {
+          semanticStallCount++;
+        } else {
+          semanticStallCount = 0;
+          lastSemanticFingerprint = semanticFingerprint;
+        }
+        recentFingerprints.push(semanticFingerprint);
+        if (recentFingerprints.length > SEMANTIC_STALL_WINDOW) recentFingerprints.shift();
+        recentStatePairs.push(`${q}\n${d}`);
+        if (recentStatePairs.length > SEMANTIC_STALL_WINDOW) recentStatePairs.shift();
+        const fingerprintHits = recentFingerprints.filter(fp => fp === semanticFingerprint).length;
+        const uniqueFingerprintCount = new Set(recentFingerprints).size;
+        const uniqueStatePairCount = new Set(recentStatePairs).size;
+        const rotationStall = recentFingerprints.length >= SEMANTIC_STALL_WINDOW
+          && uniqueFingerprintCount <= Math.max(3, Math.floor(SEMANTIC_STALL_LIMIT / 2));
+        const stateLoopStall = recentStatePairs.length >= SEMANTIC_STALL_WINDOW
+          && uniqueStatePairCount <= Math.max(2, Math.floor(SEMANTIC_STALL_LIMIT / 3));
+
+        if (semanticStallCount >= SEMANTIC_STALL_LIMIT || fingerprintHits >= SEMANTIC_STALL_LIMIT || rotationStall || stateLoopStall) {
+          const dPath = this.resolveTapePath(d) || path.join(WORKSPACE_DIR, 'MAIN_TAPE.md');
+          fs.appendFileSync(
+            dPath,
+            `\n[SYSTEM WARNING]: Semantic stall detected (consecutive=${semanticStallCount}, windowHits=${fingerprintHits}, unique=${uniqueFingerprintCount}, stateUnique=${uniqueStatePairCount}, limit=${SEMANTIC_STALL_LIMIT}). Transitioning to FATAL_DEBUG.\n`,
+            'utf-8'
+          );
+          this.setQ('FATAL_DEBUG');
+          this.broadcast({ type: 'state_update', q: this.getQ(), d: this.getD() });
+          break;
+        }
 
         if (q === "HALT") {
           console.log("🏁 HALT State Reached. Long-cycle test passed.");
@@ -156,7 +461,7 @@ export class TuringClawEngine {
           break;
         }
 
-        const contextC = `[STATE REGISTER q]: ${q}\n[HEAD POINTER d]: ${d}\n[CELL CONTENT s]:\n${s}`;
+        const contextC = `[STATE REGISTER q]: ${q}\n[NOTEBOOK n]:\n${n}\n[HEAD POINTER d]: ${d}\n[CELL CONTENT s]:\n${s}`;
         console.log(`\n[${q}] Head at [${d}] -> Computing δ (${LLM_PROVIDER})...`);
 
         let llmOutput = '';
@@ -297,7 +602,10 @@ export class TuringClawEngine {
           recentOutputs = []; // Reset after breaking
         }
 
-        await this.applyDelta(llmOutput, d);
+        if (this.getCurrentRequestId() !== requestId) {
+          continue;
+        }
+        await this.applyDelta(llmOutput, d, requestId);
 
         // Broadcast updates
         this.broadcast({ type: 'tape_update', content: this.readCellS(this.getD()) });
@@ -306,7 +614,7 @@ export class TuringClawEngine {
     } catch (error: any) {
       console.error("Fatal Error in Simulation Loop:", error);
       const d = this.getD();
-      const targetFile = path.join(WORKSPACE_DIR, d);
+      const targetFile = this.resolveTapePath(d) || path.join(WORKSPACE_DIR, 'MAIN_TAPE.md');
       fs.appendFileSync(targetFile, `\n[FATAL SYSTEM ERROR]: ${error.message}\n`, 'utf-8');
       this.broadcast({ type: 'tape_update', content: this.readCellS(d) });
     } finally {
@@ -315,20 +623,28 @@ export class TuringClawEngine {
     }
   }
 
-  public async applyDelta(llmOutput: string, currentD: string) {
-    const targetFile = path.join(WORKSPACE_DIR, currentD);
+  public async applyDelta(llmOutput: string, currentD: string, requestId: number = this.getCurrentRequestId()) {
+    if (this.getCurrentRequestId() !== requestId) return;
+    const targetFile = this.resolveTapePath(currentD) || path.join(WORKSPACE_DIR, "MAIN_TAPE.md");
     fs.mkdirSync(path.dirname(targetFile), { recursive: true });
     let hasAction = false;
 
     // 1. State Transition q'
     const stateMatch = llmOutput.match(/<STATE>(.*?)<\/STATE>/s);
-    if (stateMatch) {
-      this.setQ(stateMatch[1].trim());
-    }
+    const requestedState = stateMatch ? stateMatch[1].trim() : null;
 
     // 2. Head Movement d'
     const gotoMatch = llmOutput.match(/<GOTO path="([^"]+)"\s*\/>/);
-    const dPrime = gotoMatch ? gotoMatch[1].trim() : currentD;
+    const dPrimeRaw = gotoMatch ? gotoMatch[1].trim() : currentD;
+    let dPrime = dPrimeRaw;
+    if (gotoMatch && !this.isValidRelativeTapePath(dPrimeRaw)) {
+      fs.appendFileSync(
+        targetFile,
+        `\n[DISCIPLINE ERROR]: Invalid <GOTO> path '${dPrimeRaw}'. Use only relative file paths.\n`,
+        'utf-8'
+      );
+      dPrime = currentD;
+    }
 
     // 3. Symbol Operations s'
 
@@ -336,14 +652,17 @@ export class TuringClawEngine {
     const writeRegex = /<WRITE>(.*?)<\/WRITE>/gs;
     let writeMatch;
     while ((writeMatch = writeRegex.exec(llmOutput)) !== null) {
+      if (this.getCurrentRequestId() !== requestId) return;
       hasAction = true;
       fs.appendFileSync(targetFile, `\n${writeMatch[1].trim()}\n`, 'utf-8');
+      this.invalidateExecAudit(requestId);
     }
 
     // <ERASE>
     const eraseRegex = /<ERASE start="(\d+)" end="(\d+)"\s*\/>/g;
     let eraseMatch;
     while ((eraseMatch = eraseRegex.exec(llmOutput)) !== null) {
+      if (this.getCurrentRequestId() !== requestId) return;
       hasAction = true;
       const start = parseInt(eraseMatch[1], 10);
       const end = parseInt(eraseMatch[2], 10);
@@ -352,6 +671,7 @@ export class TuringClawEngine {
         if (start >= 1 && end >= start && end <= lines.length) {
           lines.splice(start - 1, end - start + 1, `[SYSTEM]: ... Lines ${start}-${end} physically erased by The Rubber ...`);
           fs.writeFileSync(targetFile, lines.join('\n'), 'utf-8');
+          this.invalidateExecAudit(requestId);
         }
       }
     }
@@ -360,6 +680,7 @@ export class TuringClawEngine {
     const replaceRegex = /<REPLACE start="(\d+)" end="(\d+)">([\s\S]*?)<\/REPLACE>/g;
     let replaceMatch;
     while ((replaceMatch = replaceRegex.exec(llmOutput)) !== null) {
+      if (this.getCurrentRequestId() !== requestId) return;
       hasAction = true;
       const start = parseInt(replaceMatch[1], 10);
       const end = parseInt(replaceMatch[2], 10);
@@ -371,6 +692,7 @@ export class TuringClawEngine {
           const replacementLines = newLines.split('\n');
           lines.splice(start - 1, end - start + 1, ...replacementLines);
           fs.writeFileSync(targetFile, lines.join('\n'), 'utf-8');
+          this.invalidateExecAudit(requestId);
         }
       }
     }
@@ -379,25 +701,75 @@ export class TuringClawEngine {
     const execRegex = /<EXEC>\s*(.*?)\s*<\/EXEC>/gs;
     let execMatch;
     while ((execMatch = execRegex.exec(llmOutput)) !== null) {
+      if (this.getCurrentRequestId() !== requestId) return;
       hasAction = true;
       const cmd = execMatch[1].trim();
+      if (!this.isExecCommandAllowed(cmd)) {
+        this.writeExecAudit(requestId, 'error', cmd, '[EXEC BLOCKED] Rejected by strict exec guard.');
+        fs.appendFileSync(
+          targetFile,
+          `\n[EXEC ERROR for \`${cmd.substring(0, 20)}...\`]:\n[EXEC BLOCKED] Rejected by strict exec guard.\n`,
+          'utf-8'
+        );
+        continue;
+      }
       try {
         const out = await this.execPromise(cmd, WORKSPACE_DIR);
-        const truncated = out.substring(0, MAX_STDOUT);
-        fs.appendFileSync(targetFile, `\n[EXEC RESULT for \`${cmd.substring(0, 20)}...\`]:\n${truncated || 'Silent Success'}\n`, 'utf-8');
+        if (this.getCurrentRequestId() !== requestId) return;
+        const truncated = this.truncateForTape(out || 'Silent Success', MAX_STDOUT);
+        this.writeExecAudit(requestId, 'ok', cmd, out || '');
+        fs.appendFileSync(
+          targetFile,
+          `\n[EXEC RESULT OK for \`${cmd.substring(0, 20)}...\`]:\n${truncated}\n`,
+          'utf-8'
+        );
       } catch (err: any) {
-        const truncated = err.message.substring(0, MAX_STDOUT);
+        if (this.getCurrentRequestId() !== requestId) return;
+        const truncated = this.truncateForTape(err.message, MAX_STDOUT);
+        this.writeExecAudit(requestId, 'error', cmd, err.message || '');
         fs.appendFileSync(targetFile, `\n[EXEC ERROR for \`${cmd.substring(0, 20)}...\`]:\n${truncated}\n`, 'utf-8');
       }
     }
 
     // Discipline Check
-    if (!hasAction && !gotoMatch && !llmOutput.includes("<STATE>HALT</STATE>")) {
+    if (!hasAction && !gotoMatch && !requestedState) {
       fs.appendFileSync(targetFile, `\n[DISCIPLINE ERROR]: Invalid δ output. Must output <STATE>, <GOTO>, <WRITE>, <ERASE>, <REPLACE>, or <EXEC>.\n`, 'utf-8');
+    }
+
+    // Apply state transition after operations so HALT can be gated by concrete evidence.
+    if (requestedState) {
+      if (this.getCurrentRequestId() !== requestId) return;
+      if (requestedState === 'HALT' && !this.haltGateSatisfied(targetFile, requestId)) {
+        fs.appendFileSync(
+          targetFile,
+          `\n[HALT GATE]: HALT rejected due to insufficient verifiable evidence. Continue with explicit verification EXEC steps.\n`,
+          'utf-8'
+        );
+        this.setQ('q_recover: HALT_GATE_REJECTED');
+      } else {
+        this.setQ(requestedState);
+      }
     }
 
     // Apply Head Movement
     if (dPrime !== currentD) {
+      const dPrimePath = this.resolveTapePath(dPrime);
+      if (!dPrimePath) {
+        fs.appendFileSync(
+          targetFile,
+          `\n[DISCIPLINE ERROR]: <GOTO> target '${dPrime}' is outside workspace or invalid. Head remains at '${currentD}'.\n`,
+          'utf-8'
+        );
+        return;
+      }
+      if (dPrimePath && fs.existsSync(dPrimePath) && fs.statSync(dPrimePath).isDirectory()) {
+        fs.appendFileSync(
+          targetFile,
+          `\n[DISCIPLINE ERROR]: <GOTO> target '${dPrime}' is a directory. Head remains at '${currentD}'.\n`,
+          'utf-8'
+        );
+        return;
+      }
       console.log(`   🖨️ Head Moved: ${currentD} -> ${dPrime}`);
       this.setD(dPrime);
     }
@@ -406,7 +778,7 @@ export class TuringClawEngine {
   private execPromise(cmd: string, cwd: string): Promise<string> {
     return new Promise((resolve, reject) => {
       // LAW 5: NO INFINITE HANGS
-      const timeoutMs = process.env.TURINGCLAW_TIMEOUT ? parseInt(process.env.TURINGCLAW_TIMEOUT, 10) : 600000;
+      const timeoutMs = parsePositiveInt(process.env.TURINGCLAW_TIMEOUT, 600000);
       exec(cmd, { cwd, timeout: timeoutMs, killSignal: 'SIGKILL' }, (error, stdout, stderr) => {
         if (error) {
           if (error.killed) {
