@@ -29,7 +29,7 @@ type AgentProcess = {
 type TmuxWatcher = {
   target: string;
   timer: NodeJS.Timeout;
-  lastDigest: string;
+  lastTailLines: string[];
   busy: boolean;
   errorCount: number;
   lastSentAt: number;
@@ -221,6 +221,30 @@ function tmuxDigest(snapshot: string): string {
   return deduped.join("\n").trim();
 }
 
+function tmuxTailLines(snapshot: string): string[] {
+  const digest = tmuxDigest(snapshot);
+  if (!digest) return [];
+  return digest
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+}
+
+function uniqueNewLines(prev: string[], next: string[]): string[] {
+  if (next.length === 0) return [];
+
+  const prevSet = new Set(prev);
+  const out: string[] = [];
+  for (const line of next) {
+    if (!prevSet.has(line)) {
+      if (out.length === 0 || out[out.length - 1] !== line) {
+        out.push(line);
+      }
+    }
+  }
+  return out;
+}
+
 function clipPreserveTail(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   const marker = "...[older lines truncated]\n";
@@ -231,7 +255,7 @@ function clipPreserveTail(text: string, maxChars: number): string {
 function buildTmuxPush(kind: "started" | "update", target: string, digest: string): string {
   const headerLines =
     kind === "started"
-      ? [`tmux watcher started`, `target=${target}`, `poll=${TMUX_POLL_SECONDS}s`]
+      ? [`tmux watcher started`, `target=${target}`, `poll=${TMUX_POLL_SECONDS}s`, `mode=new-lines-only`]
       : [`tmux update`, `target=${target}`, `at=${new Date().toISOString()}`];
   const header = `${headerLines.join("\n")}\n\n`;
   const maxChars = Math.min(3900, Math.max(1200, OUTPUT_LIMIT));
@@ -871,8 +895,8 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
   stopTmuxWatcher(chatId);
 
   const initialSnapshot = await captureTmuxPane(target);
-  const initialDigest = tmuxDigest(initialSnapshot);
-  await sendMessage(chatId, buildTmuxPush("started", target, initialDigest));
+  const initialTailLines = tmuxTailLines(initialSnapshot);
+  await sendMessage(chatId, buildTmuxPush("started", target, "baseline captured; waiting for new output..."));
 
   const key = tmuxWatcherKey(chatId);
   const watcher: TmuxWatcher = {
@@ -886,16 +910,18 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
 
         try {
           const snapshot = await captureTmuxPane(live.target);
-          const nextDigest = tmuxDigest(snapshot);
+          const nextTailLines = tmuxTailLines(snapshot);
+          const newLines = uniqueNewLines(live.lastTailLines, nextTailLines);
           const minGapMs = Math.max(1, TMUX_MIN_PUSH_SECONDS) * 1000;
           const now = Date.now();
 
-          if (nextDigest !== live.lastDigest && now - live.lastSentAt >= minGapMs) {
-            live.lastDigest = nextDigest;
+          if (newLines.length > 0 && now - live.lastSentAt >= minGapMs) {
             live.lastSentAt = now;
             live.errorCount = 0;
-            await sendMessage(chatId, buildTmuxPush("update", live.target, nextDigest));
+            const payload = newLines.slice(-Math.max(20, TMUX_TAIL_LINES)).join("\n");
+            await sendMessage(chatId, buildTmuxPush("update", live.target, payload));
           }
+          live.lastTailLines = nextTailLines;
         } catch (error: any) {
           live.errorCount += 1;
           if (live.errorCount >= 3) {
@@ -909,7 +935,7 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
         // no-op; loop is best-effort and self-healing.
       });
     }, Math.max(2, TMUX_POLL_SECONDS) * 1000),
-    lastDigest: initialDigest,
+    lastTailLines: initialTailLines,
     busy: false,
     errorCount: 0,
     lastSentAt: Date.now(),
