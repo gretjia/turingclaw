@@ -226,6 +226,13 @@ function isImplicitTmuxInputRequest(text: string): boolean {
   return extractImplicitReplyPayload(text) !== null;
 }
 
+function parseAgentOverrideText(text: string): string | null {
+  const m = text.match(/^\s*agent\s*[:：]\s*(.+)$/i);
+  if (!m?.[1]) return null;
+  const payload = m[1].trim();
+  return payload || null;
+}
+
 function isTmuxMonitorRequest(text: string): boolean {
   const lower = text.toLowerCase();
   if (!lower.includes("tmux")) return false;
@@ -1241,6 +1248,7 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
         "/bash <cmd> - run shell command (optional, disabled by default)",
         "Natural-language tmux monitor: send 'tmux attach -t <pane>, 实时监测并推送变化'.",
         "Natural-language tmux input: send '在tmux %1中输入：同意。'",
+        "When tmux watcher is active, plain text goes to tmux by default. Use 'agent: ...' to force agent task mode.",
         "Any non-command text is sent to the active agent as task input.",
       ].join("\n")
     );
@@ -1514,6 +1522,7 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
 
   const chatId = String(msg.chat.id);
   const session = getSession(chatId);
+  const agentOverrideText = parseAgentOverrideText(text);
   const explicitTarget = extractTmuxTarget(text);
   const watchedTarget = activeTmuxTarget(msg.chat.id);
   const explicitParsed = extractTmuxInputPayload(text);
@@ -1559,6 +1568,25 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
     return;
   }
 
+  // Focus mode: while watching a tmux pane, plain text defaults to tmux input.
+  if (watchedTarget && !agentOverrideText) {
+    const payload = text.trim();
+    if (!payload) return;
+    try {
+      await sendTmuxInput(watchedTarget, payload, true);
+      await sendMessage(
+        msg.chat.id,
+        `tmux input sent\ntarget=${watchedTarget}\npayload=${payload}\nenter=true`
+      );
+    } catch (error: any) {
+      await sendMessage(
+        msg.chat.id,
+        `tmux input failed\ntarget=${watchedTarget}\nerror=${error?.message || "unknown error"}`
+      );
+    }
+    return;
+  }
+
   const agent = getOrStartAgent(chatId, session.activeAgent);
   const key = keyFor(chatId, session.activeAgent);
   const tracker =
@@ -1582,7 +1610,7 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
     id: newTaskId(),
     state: "queued",
     project,
-    text: buildEnrichedTaskText(agent, project, text),
+    text: buildEnrichedTaskText(agent, project, agentOverrideText ?? text),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
