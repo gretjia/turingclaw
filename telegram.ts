@@ -141,7 +141,12 @@ function tmuxWatcherKey(chatId: number | string): string {
 }
 
 function sanitizeTmuxTarget(raw: string): string | null {
-  const candidate = raw.trim();
+  let candidate = raw.trim();
+  if (candidate.startsWith("-%")) {
+    candidate = candidate.slice(1);
+  }
+  candidate = candidate.replace(/[）)]$/, "");
+  candidate = candidate.replace(/^[（(]/, "");
   if (!candidate) return null;
   if (!/^[A-Za-z0-9:_.%+-]{1,64}$/.test(candidate)) return null;
   return candidate;
@@ -162,6 +167,34 @@ function extractTmuxTarget(text: string): string | null {
   }
 
   return null;
+}
+
+function hasTmuxInputVerb(text: string): boolean {
+  return /(输入|回复|发送|键入|type)/i.test(text);
+}
+
+function extractTmuxInputPayload(text: string): { payload: string; pressEnter: boolean } | null {
+  const quoted = text.match(/[“"]([^”"]+)[”"]\s*$/);
+  const quotedPayload = quoted?.[1]?.trim();
+
+  const withColon = text.match(/(?:输入|回复|发送|键入|type)(?:给我|为我|一下)?\s*[:：]\s*(.+)$/i);
+  const plain = text.match(/(?:输入|回复|发送|键入|type)(?:给我|为我|一下)?\s*([^\n]+)$/i);
+
+  let payload = quotedPayload ?? withColon?.[1]?.trim() ?? plain?.[1]?.trim() ?? '';
+  if (!payload) return null;
+
+  payload = payload.replace(/^(内容|文本)\s*[:：]\s*/i, '').trim();
+  if (!payload) return null;
+
+  const noEnter = /不回车|不要回车|no enter|without enter/i.test(text);
+  return { payload, pressEnter: !noEnter };
+}
+
+function isTmuxInputRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (!lower.includes("tmux")) return false;
+  if (!hasTmuxInputVerb(text)) return false;
+  return extractTmuxInputPayload(text) !== null;
 }
 
 function isTmuxMonitorRequest(text: string): boolean {
@@ -992,6 +1025,33 @@ async function listTmuxTargets(): Promise<string> {
   }
 }
 
+function activeTmuxTarget(chatId: number | string): string | null {
+  const watcher = tmuxWatchers.get(tmuxWatcherKey(chatId));
+  return watcher?.target ?? null;
+}
+
+async function sendTmuxInput(target: string, payload: string, pressEnter: boolean): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const args = ["send-keys", "-t", target, payload];
+    if (pressEnter) args.push("C-m");
+
+    const child = spawn("tmux", args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "ignore",
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`tmux send-keys failed with code ${code ?? 1}`));
+    });
+  });
+}
+
 function stopTmuxWatcher(chatId: number | string): boolean {
   const key = tmuxWatcherKey(chatId);
   const watcher = tmuxWatchers.get(key);
@@ -1146,9 +1206,12 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
         "/where - show host current directory and listing preview",
         "/tape [n] - tail MAIN_TAPE.md (default 40 lines)",
         "/tmuxlist - list available tmux pane targets",
+        "/tmuxsend <target> <text> - send text to tmux target and press Enter",
+        "/tmuxtype <text> - send text to currently watched tmux target",
         "/tmuxstop - stop active tmux live watcher",
         "/bash <cmd> - run shell command (optional, disabled by default)",
         "Natural-language tmux monitor: send 'tmux attach -t <pane>, 实时监测并推送变化'.",
+        "Natural-language tmux input: send '在tmux %1中输入：同意。'",
         "Any non-command text is sent to the active agent as task input.",
       ].join("\n")
     );
@@ -1350,6 +1413,43 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
     return;
   }
 
+  if (cmd === "/tmuxsend") {
+    const [targetRaw, ...contentParts] = arg.split(/\s+/);
+    const target = sanitizeTmuxTarget(targetRaw || "");
+    const payload = contentParts.join(" ").trim();
+    if (!target || !payload) {
+      await sendMessage(msg.chat.id, "usage: /tmuxsend <target> <text>");
+      return;
+    }
+    try {
+      await sendTmuxInput(target, payload, true);
+      await sendMessage(msg.chat.id, `tmux input sent\ntarget=${target}\npayload=${payload}`);
+    } catch (error: any) {
+      await sendMessage(msg.chat.id, `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown"}`);
+    }
+    return;
+  }
+
+  if (cmd === "/tmuxtype") {
+    const target = activeTmuxTarget(msg.chat.id);
+    const payload = arg.trim();
+    if (!target) {
+      await sendMessage(msg.chat.id, "no active tmux watcher target. start with: tmux attach -t %1");
+      return;
+    }
+    if (!payload) {
+      await sendMessage(msg.chat.id, "usage: /tmuxtype <text>");
+      return;
+    }
+    try {
+      await sendTmuxInput(target, payload, true);
+      await sendMessage(msg.chat.id, `tmux input sent\ntarget=${target}\npayload=${payload}`);
+    } catch (error: any) {
+      await sendMessage(msg.chat.id, `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown"}`);
+    }
+    return;
+  }
+
   await sendMessage(msg.chat.id, "unknown command. use /help");
 }
 
@@ -1385,6 +1485,34 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
 
   const chatId = String(msg.chat.id);
   const session = getSession(chatId);
+
+  if (isTmuxInputRequest(text)) {
+    const explicitTarget = extractTmuxTarget(text);
+    const target = explicitTarget ?? activeTmuxTarget(msg.chat.id);
+    const parsed = extractTmuxInputPayload(text);
+
+    if (!target || !parsed) {
+      await sendMessage(
+        msg.chat.id,
+        "tmux input parse failed. use: 在tmux attach -t %1中输入：同意。 或 /tmuxsend %1 同意。"
+      );
+      return;
+    }
+
+    try {
+      await sendTmuxInput(target, parsed.payload, parsed.pressEnter);
+      await sendMessage(
+        msg.chat.id,
+        `tmux input sent\ntarget=${target}\npayload=${parsed.payload}\nenter=${parsed.pressEnter}`
+      );
+    } catch (error: any) {
+      await sendMessage(
+        msg.chat.id,
+        `tmux input failed\ntarget=${target}\nerror=${error?.message || "unknown error"}`
+      );
+    }
+    return;
+  }
 
   const monitorTarget = extractTmuxTarget(text);
   if (monitorTarget && isTmuxMonitorRequest(text)) {
