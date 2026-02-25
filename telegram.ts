@@ -30,6 +30,9 @@ type TmuxWatcher = {
   target: string;
   timer: NodeJS.Timeout;
   lastTailLines: string[];
+  pendingLines: string[];
+  pendingSinceAt: number;
+  lastDigestChangeAt: number;
   busy: boolean;
   errorCount: number;
   lastSentAt: number;
@@ -48,6 +51,8 @@ const OUTPUT_LIMIT = Number(process.env.TELEGRAM_OUTPUT_LIMIT || 3000);
 const TMUX_POLL_SECONDS = Number(process.env.TELEGRAM_TMUX_POLL_SECONDS || 5);
 const TMUX_TAIL_LINES = Number(process.env.TELEGRAM_TMUX_TAIL_LINES || 80);
 const TMUX_MIN_PUSH_SECONDS = Number(process.env.TELEGRAM_TMUX_MIN_PUSH_SECONDS || 5);
+const TMUX_QUIET_SECONDS = Number(process.env.TELEGRAM_TMUX_QUIET_SECONDS || 3);
+const TMUX_MAX_BATCH_SECONDS = Number(process.env.TELEGRAM_TMUX_MAX_BATCH_SECONDS || 15);
 const STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS || 120);
 const HEARTBEAT_SECONDS = Number(process.env.TELEGRAM_HEARTBEAT_SECONDS || 45);
 const MAX_RECOVERY_ATTEMPTS = Number(process.env.TELEGRAM_MAX_RECOVERY_ATTEMPTS || 3);
@@ -233,19 +238,46 @@ function tmuxTailLines(snapshot: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-function uniqueNewLines(prev: string[], next: string[]): string[] {
-  if (next.length === 0) return [];
+function sameLines(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
-  const prevSet = new Set(prev);
-  const out: string[] = [];
-  for (const line of next) {
-    if (!prevSet.has(line)) {
-      if (out.length === 0 || out[out.length - 1] !== line) {
-        out.push(line);
-      }
+function computeAppendedLines(prev: string[], next: string[]): string[] {
+  if (next.length === 0) return [];
+  if (prev.length === 0) return next;
+
+  if (next.length >= prev.length && sameLines(next.slice(0, prev.length), prev)) {
+    return next.slice(prev.length);
+  }
+
+  const maxOverlap = Math.min(prev.length, next.length);
+  for (let k = maxOverlap; k >= 1; k -= 1) {
+    if (sameLines(prev.slice(prev.length - k), next.slice(0, k))) {
+      return next.slice(k);
     }
   }
-  return out;
+
+  return [];
+}
+
+function appendPendingLines(pending: string[], lines: string[]): string[] {
+  const next = [...pending];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    if (next.length === 0 || next[next.length - 1] !== line) {
+      next.push(line);
+    }
+  }
+
+  if (next.length > 400) {
+    return next.slice(next.length - 400);
+  }
+
+  return next;
 }
 
 function clipPreserveTail(text: string, maxChars: number): string {
@@ -931,17 +963,37 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
         try {
           const snapshot = await captureTmuxPane(live.target);
           const nextTailLines = tmuxTailLines(snapshot);
-          const newLines = uniqueNewLines(live.lastTailLines, nextTailLines);
-          const minGapMs = Math.max(1, TMUX_MIN_PUSH_SECONDS) * 1000;
           const now = Date.now();
+          const minGapMs = Math.max(1, TMUX_MIN_PUSH_SECONDS) * 1000;
+          const quietMs = Math.max(1, TMUX_QUIET_SECONDS) * 1000;
+          const maxBatchMs = Math.max(2, TMUX_MAX_BATCH_SECONDS) * 1000;
 
-          if (newLines.length > 0 && now - live.lastSentAt >= minGapMs) {
+          if (!sameLines(nextTailLines, live.lastTailLines)) {
+            live.lastDigestChangeAt = now;
+            const appended = computeAppendedLines(live.lastTailLines, nextTailLines);
+            if (appended.length > 0) {
+              live.pendingLines = appendPendingLines(live.pendingLines, appended);
+              if (live.pendingSinceAt === 0) {
+                live.pendingSinceAt = now;
+              }
+            }
+            live.lastTailLines = nextTailLines;
+          }
+
+          const pendingAge = live.pendingSinceAt > 0 ? now - live.pendingSinceAt : 0;
+          const shouldFlush =
+            live.pendingLines.length > 0 &&
+            now - live.lastSentAt >= minGapMs &&
+            (now - live.lastDigestChangeAt >= quietMs || pendingAge >= maxBatchMs);
+
+          if (shouldFlush) {
             live.lastSentAt = now;
             live.errorCount = 0;
-            const payload = newLines.slice(-Math.max(20, TMUX_TAIL_LINES)).join("\n");
+            const payload = live.pendingLines.slice(-Math.max(20, TMUX_TAIL_LINES)).join("\n");
             await sendMessage(chatId, buildTmuxPush("update", live.target, payload));
+            live.pendingLines = [];
+            live.pendingSinceAt = 0;
           }
-          live.lastTailLines = nextTailLines;
         } catch (error: any) {
           live.errorCount += 1;
           if (live.errorCount >= 3) {
@@ -956,6 +1008,9 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
       });
     }, Math.max(2, TMUX_POLL_SECONDS) * 1000),
     lastTailLines: initialTailLines,
+    pendingLines: [],
+    pendingSinceAt: 0,
+    lastDigestChangeAt: Date.now(),
     busy: false,
     errorCount: 0,
     lastSentAt: Date.now(),
