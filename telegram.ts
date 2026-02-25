@@ -29,9 +29,10 @@ type AgentProcess = {
 type TmuxWatcher = {
   target: string;
   timer: NodeJS.Timeout;
-  lastSnapshot: string;
+  lastDigest: string;
   busy: boolean;
   errorCount: number;
+  lastSentAt: number;
 };
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
@@ -45,6 +46,8 @@ const ENABLE_BASH = (process.env.TELEGRAM_ENABLE_BASH || "false").toLowerCase() 
 const BASH_TIMEOUT_MS = Number(process.env.TELEGRAM_BASH_TIMEOUT_MS || 25000);
 const OUTPUT_LIMIT = Number(process.env.TELEGRAM_OUTPUT_LIMIT || 3000);
 const TMUX_POLL_SECONDS = Number(process.env.TELEGRAM_TMUX_POLL_SECONDS || 5);
+const TMUX_TAIL_LINES = Number(process.env.TELEGRAM_TMUX_TAIL_LINES || 80);
+const TMUX_MIN_PUSH_SECONDS = Number(process.env.TELEGRAM_TMUX_MIN_PUSH_SECONDS || 5);
 const STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS || 120);
 const HEARTBEAT_SECONDS = Number(process.env.TELEGRAM_HEARTBEAT_SECONDS || 45);
 const MAX_RECOVERY_ATTEMPTS = Number(process.env.TELEGRAM_MAX_RECOVERY_ATTEMPTS || 3);
@@ -181,6 +184,38 @@ function isTmuxStopRequest(text: string): boolean {
 function tailText(text: string, maxLines: number): string {
   const lines = text.split("\n");
   return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
+}
+
+function stripAnsi(input: string): string {
+  return input.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
+function tmuxDigest(snapshot: string): string {
+  const normalized = stripAnsi(snapshot)
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.replace(/\s+$/g, ""))
+    .join("\n")
+    .trim();
+  return tailText(normalized, Math.max(20, TMUX_TAIL_LINES));
+}
+
+function clipPreserveTail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const marker = "...[older lines truncated]\n";
+  const budget = Math.max(1, maxChars - marker.length);
+  return `${marker}${text.slice(-budget)}`;
+}
+
+function buildTmuxPush(kind: "started" | "update", target: string, digest: string): string {
+  const headerLines =
+    kind === "started"
+      ? [`tmux watcher started`, `target=${target}`, `poll=${TMUX_POLL_SECONDS}s`]
+      : [`tmux update`, `target=${target}`, `at=${new Date().toISOString()}`];
+  const header = `${headerLines.join("\n")}\n\n`;
+  const maxChars = Math.min(3900, Math.max(1200, OUTPUT_LIMIT));
+  const body = clipPreserveTail(digest, Math.max(200, maxChars - header.length));
+  return `${header}${body}`;
 }
 
 function newTaskId(): string {
@@ -815,17 +850,8 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
   stopTmuxWatcher(chatId);
 
   const initialSnapshot = await captureTmuxPane(target);
-  await sendMessage(
-    chatId,
-    [
-      `tmux watcher started`,
-      `target=${target}`,
-      `poll=${TMUX_POLL_SECONDS}s`,
-      "",
-      "initial snapshot:",
-      tailText(initialSnapshot, 60),
-    ].join("\n").slice(0, OUTPUT_LIMIT)
-  );
+  const initialDigest = tmuxDigest(initialSnapshot);
+  await sendMessage(chatId, buildTmuxPush("started", target, initialDigest));
 
   const key = tmuxWatcherKey(chatId);
   const watcher: TmuxWatcher = {
@@ -839,19 +865,15 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
 
         try {
           const snapshot = await captureTmuxPane(live.target);
-          if (snapshot !== live.lastSnapshot) {
-            live.lastSnapshot = snapshot;
+          const nextDigest = tmuxDigest(snapshot);
+          const minGapMs = Math.max(1, TMUX_MIN_PUSH_SECONDS) * 1000;
+          const now = Date.now();
+
+          if (nextDigest !== live.lastDigest && now - live.lastSentAt >= minGapMs) {
+            live.lastDigest = nextDigest;
+            live.lastSentAt = now;
             live.errorCount = 0;
-            await sendMessage(
-              chatId,
-              [
-                `tmux update`,
-                `target=${live.target}`,
-                `at=${new Date().toISOString()}`,
-                "",
-                tailText(snapshot, 80),
-              ].join("\n").slice(0, OUTPUT_LIMIT)
-            );
+            await sendMessage(chatId, buildTmuxPush("update", live.target, nextDigest));
           }
         } catch (error: any) {
           live.errorCount += 1;
@@ -866,9 +888,10 @@ async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
         // no-op; loop is best-effort and self-healing.
       });
     }, Math.max(2, TMUX_POLL_SECONDS) * 1000),
-    lastSnapshot: initialSnapshot,
+    lastDigest: initialDigest,
     busy: false,
     errorCount: 0,
+    lastSentAt: Date.now(),
   };
 
   tmuxWatchers.set(key, watcher);
