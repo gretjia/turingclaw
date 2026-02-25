@@ -7,6 +7,14 @@ coverage/
 .env*
 !.env.example
 
+# Handover docs policy:
+# - Shareable docs live in .handover/*.md (tracked)
+# - Private/local notes live in .handover/local/ (ignored)
+.handover/local/
+.handover/local/**
+!.handover/
+!.handover/*.md
+
 # TuringClaw Workspaces and Tape Memory
 workspace/
 omega/
@@ -16,6 +24,3 @@ MAIN_TAPE.md
 .tmp_prompt.txt
 WATCHDOG_LOG.md
 .telegram/
-
-# Agent handover: keep local machine notes untracked
-.handover/local/
