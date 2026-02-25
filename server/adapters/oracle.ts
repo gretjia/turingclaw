@@ -45,7 +45,97 @@ function toTransition(value: unknown): Transition {
     throw new Error('Oracle output missing d_next');
   }
 
-  return { q_next, s_prime, d_next };
+  return { q_next, s_prime, d_next: normalizePointer(d_next) };
+}
+
+function normalizePointer(raw: string): string {
+  const pointer = raw.trim();
+  if (!pointer) return './MAIN_TAPE.md';
+
+  if (pointer === 'MAIN_TAPE.md') {
+    return './MAIN_TAPE.md';
+  }
+
+  if (pointer === 'HALT' || pointer === 'sys://error_recovery') {
+    return pointer;
+  }
+
+  if (
+    pointer.startsWith('./') ||
+    pointer.startsWith('/') ||
+    pointer.startsWith('http://') ||
+    pointer.startsWith('https://') ||
+    pointer.startsWith('$ ') ||
+    pointer.startsWith('tty://')
+  ) {
+    return pointer;
+  }
+
+  if (
+    /^[A-Za-z0-9._/-]{1,240}$/.test(pointer) &&
+    !pointer.includes('..') &&
+    (pointer.includes('/') || pointer.includes('.'))
+  ) {
+    return pointer;
+  }
+
+  return './MAIN_TAPE.md';
+}
+
+function extractJsonCandidate(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+
+  let candidate = trimmed;
+  if (candidate.startsWith('```')) {
+    candidate = candidate
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+  }
+
+  const firstBrace = candidate.indexOf('{');
+  const lastBrace = candidate.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return candidate.slice(firstBrace, lastBrace + 1);
+  }
+
+  return candidate;
+}
+
+function parseTransitionPayload(raw: string): Transition {
+  const attempts = [raw, extractJsonCandidate(raw)];
+  let parseError: string | null = null;
+
+  for (const candidate of attempts) {
+    if (!candidate.trim()) continue;
+    try {
+      return toTransition(JSON.parse(candidate));
+    } catch (error: any) {
+      parseError = error?.message ?? 'unknown parse error';
+    }
+  }
+
+  throw new Error(`Oracle returned invalid JSON arguments: ${parseError ?? 'unable to parse payload'}`);
+}
+
+function messageContentToText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  const parts: string[] = [];
+  for (const part of content) {
+    if (typeof part === 'string') {
+      parts.push(part);
+      continue;
+    }
+    if (part && typeof part === 'object' && 'text' in part) {
+      const text = (part as { text?: unknown }).text;
+      if (typeof text === 'string') parts.push(text);
+    }
+  }
+
+  return parts.join('\n').trim();
 }
 
 export interface StatelessOracleOptions {
@@ -59,6 +149,7 @@ export class StatelessOracle implements IOracle {
   private readonly client: OpenAI;
   private readonly model: string;
   private readonly timeoutMs: number;
+  private readonly usingKimi: boolean;
 
   constructor(options: StatelessOracleOptions = {}) {
     const openaiKey = process.env.OPENAI_API_KEY;
@@ -73,12 +164,26 @@ export class StatelessOracle implements IOracle {
       process.env.OPENAI_BASE_URL ??
       (!openaiKey && kimiKey ? 'https://api.kimi.com/coding/v1' : undefined);
 
+    this.usingKimi =
+      (inferredBaseUrl ?? '').includes('api.kimi.com') ||
+      (!openaiKey && Boolean(kimiKey) && !options.baseURL && !process.env.OPENAI_BASE_URL);
+
     this.client = new OpenAI({
       apiKey,
       baseURL: inferredBaseUrl,
+      defaultHeaders: this.usingKimi
+        ? {
+            'X-Client-Name': process.env.ORACLE_CLIENT_NAME ?? 'TuringClaw',
+            'User-Agent': process.env.ORACLE_USER_AGENT ?? 'claude-code/0.2.15',
+          }
+        : undefined,
     });
 
-    this.model = options.model ?? process.env.ORACLE_MODEL ?? process.env.OPENAI_MODEL ?? 'gpt-4.1-mini';
+    this.model =
+      options.model ??
+      process.env.ORACLE_MODEL ??
+      process.env.OPENAI_MODEL ??
+      (this.usingKimi ? 'kimi-for-coding' : 'gpt-4.1-mini');
     this.timeoutMs =
       options.timeoutMs ??
       (Number.parseInt(process.env.ORACLE_TIMEOUT_MS ?? '', 10) || 90_000);
@@ -86,9 +191,16 @@ export class StatelessOracle implements IOracle {
 
   public async collapse(discipline: string, q: State, s: Slice): Promise<Transition> {
     const prompt = composeStatelessPrompt(discipline, q, s);
+    let lastError: Error | null = null;
+    const attempts = 3;
 
-    const completion = await this.client.chat.completions.create(
-      {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const retryNotice =
+        attempt > 1 && lastError
+          ? `Previous output failed validation (${lastError.message}). Return valid JSON arguments only.`
+          : null;
+
+      const request: any = {
         model: this.model,
         temperature: 0,
         messages: [
@@ -97,6 +209,7 @@ export class StatelessOracle implements IOracle {
             content:
               'You are a stateless transition function. Produce the next transition only via the emit_transition function call.',
           },
+          ...(retryNotice ? [{ role: 'system', content: retryNotice }] : []),
           { role: 'user', content: prompt },
         ],
         tools: [
@@ -113,27 +226,40 @@ export class StatelessOracle implements IOracle {
           type: 'function',
           function: { name: 'emit_transition' },
         },
-      } as any,
-      {
-        timeout: this.timeoutMs,
-      },
-    );
+      };
 
-    const toolCall = completion.choices?.[0]?.message?.tool_calls?.[0] as any;
-    const rawArgs = toolCall?.function?.arguments;
+      if (this.usingKimi) {
+        request.thinking = { type: 'disabled' };
+      }
 
-    if (!rawArgs) {
-      throw new Error('Oracle did not return function arguments');
+      const completion = await this.client.chat.completions.create(
+        request,
+        {
+          timeout: this.timeoutMs,
+        },
+      );
+
+      const message = completion.choices?.[0]?.message as any;
+      const toolCall = message?.tool_calls?.[0] as any;
+      const rawArgs = toolCall?.function?.arguments;
+
+      try {
+        if (typeof rawArgs === 'string' && rawArgs.trim()) {
+          return parseTransitionPayload(rawArgs);
+        }
+
+        const contentText = messageContentToText(message?.content);
+        if (contentText) {
+          return parseTransitionPayload(contentText);
+        }
+
+        throw new Error('Oracle did not return function arguments');
+      } catch (error: any) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawArgs);
-    } catch (error: any) {
-      throw new Error(`Oracle returned invalid JSON arguments: ${error?.message ?? 'unknown parse error'}`);
-    }
-
-    return toTransition(parsed);
+    throw lastError ?? new Error('Oracle failed to produce a valid transition');
   }
 }
 

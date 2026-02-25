@@ -7,6 +7,7 @@ import { TuringEngine, type IOracle, type IPhysicalManifold, type Pointer, type 
 import { UnixPhysicalManifold } from './adapters/manifold.js';
 import { StatelessOracle } from './adapters/oracle.js';
 import { GitChronos } from './adapters/chronos.js';
+import { loadDisciplineFromFile } from './discipline.js';
 
 export type RuntimeStatus = 'idle' | 'running' | 'error';
 
@@ -130,7 +131,10 @@ export class TuringRuntime extends EventEmitter {
 
   constructor(options: RuntimeOptions = {}) {
     super();
-    this.workspaceDir = path.resolve(process.cwd(), options.workspaceDir ?? process.env.TURING_WORKSPACE ?? '.turing_workspace');
+    this.workspaceDir = path.resolve(
+      process.cwd(),
+      options.workspaceDir ?? process.env.TURING_WORKSPACE ?? process.env.TURINGCLAW_WORKSPACE ?? '.turing_workspace',
+    );
     this.promptFile = path.resolve(process.cwd(), options.promptFile ?? 'turing_prompt.sh');
     this.qRegister = path.join(this.workspaceDir, '.reg_q');
     this.dRegister = path.join(this.workspaceDir, '.reg_d');
@@ -313,15 +317,7 @@ export class TuringRuntime extends EventEmitter {
   }
 
   private async loadPrompt(): Promise<string> {
-    if (await exists(this.promptFile)) {
-      return readFile(this.promptFile, 'utf8');
-    }
-
-    return [
-      '# TURING DISCIPLINE',
-      'Operate as a stateless transition function.',
-      'Output must match Transition {q_next, s_prime, d_next}.',
-    ].join('\n');
+    return loadDisciplineFromFile(this.promptFile);
   }
 
   private async readRegister(registerPath: string, fallback: string): Promise<string> {

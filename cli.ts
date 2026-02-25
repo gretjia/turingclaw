@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import { access, mkdir, readFile, writeFile } from 'fs/promises';
 import { constants as fsConstants } from 'fs';
 import path from 'path';
@@ -8,8 +9,12 @@ import { TuringEngine, type IOracle, type State, type Slice, type Transition } f
 import { UnixPhysicalManifold } from './server/adapters/manifold.js';
 import { StatelessOracle } from './server/adapters/oracle.js';
 import { GitChronos } from './server/adapters/chronos.js';
+import { loadDisciplineFromFile } from './server/discipline.js';
 
-const WORKSPACE_DIR = path.resolve(process.cwd(), process.env.TURING_WORKSPACE ?? '.turing_workspace');
+const WORKSPACE_DIR = path.resolve(
+  process.cwd(),
+  process.env.TURING_WORKSPACE ?? process.env.TURINGCLAW_WORKSPACE ?? '.turing_workspace',
+);
 const Q_REGISTER = path.join(WORKSPACE_DIR, '.reg_q');
 const D_REGISTER = path.join(WORKSPACE_DIR, '.reg_d');
 const MAIN_TAPE = path.join(WORKSPACE_DIR, 'MAIN_TAPE.md');
@@ -78,15 +83,7 @@ async function ensureWorkspace(): Promise<void> {
 }
 
 async function loadDisciplinePrompt(): Promise<string> {
-  if (await exists(PROMPT_FILE)) {
-    return readFile(PROMPT_FILE, 'utf8');
-  }
-
-  return [
-    '# TURING DISCIPLINE',
-    'Operate as a stateless transition function.',
-    'Return strict JSON for Transition {q_next, s_prime, d_next}.',
-  ].join('\n');
+  return loadDisciplineFromFile(PROMPT_FILE);
 }
 
 async function resolveInitialState(userTask: string | null): Promise<[State, string]> {

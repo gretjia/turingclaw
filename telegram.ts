@@ -26,6 +26,14 @@ type AgentProcess = {
   lastOutput: string[];
 };
 
+type TmuxWatcher = {
+  target: string;
+  timer: NodeJS.Timeout;
+  lastSnapshot: string;
+  busy: boolean;
+  errorCount: number;
+};
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT || 45);
@@ -36,6 +44,7 @@ const BASE_WORKSPACE = path.join(process.cwd(), process.env.TELEGRAM_BASE_WORKSP
 const ENABLE_BASH = (process.env.TELEGRAM_ENABLE_BASH || "false").toLowerCase() === "true";
 const BASH_TIMEOUT_MS = Number(process.env.TELEGRAM_BASH_TIMEOUT_MS || 25000);
 const OUTPUT_LIMIT = Number(process.env.TELEGRAM_OUTPUT_LIMIT || 3000);
+const TMUX_POLL_SECONDS = Number(process.env.TELEGRAM_TMUX_POLL_SECONDS || 5);
 const STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS || 120);
 const HEARTBEAT_SECONDS = Number(process.env.TELEGRAM_HEARTBEAT_SECONDS || 45);
 const MAX_RECOVERY_ATTEMPTS = Number(process.env.TELEGRAM_MAX_RECOVERY_ATTEMPTS || 3);
@@ -80,6 +89,7 @@ type TaskItem = {
 const sessions = new Map<string, SessionState>();
 const agents = new Map<string, AgentProcess>();
 const trackers = new Map<string, AgentTracker>();
+const tmuxWatchers = new Map<string, TmuxWatcher>();
 
 function loadJsonFile<T>(file: string, fallback: T): T {
   try {
@@ -111,6 +121,66 @@ function parseKey(key: string): { chatId: string; agentName: string } {
   const idx = key.indexOf(":");
   if (idx < 0) return { chatId: key, agentName: "alpha" };
   return { chatId: key.slice(0, idx), agentName: key.slice(idx + 1) };
+}
+
+function tmuxWatcherKey(chatId: number | string): string {
+  return String(chatId);
+}
+
+function sanitizeTmuxTarget(raw: string): string | null {
+  const candidate = raw.trim();
+  if (!candidate) return null;
+  if (!/^[A-Za-z0-9:_-]{1,64}$/.test(candidate)) return null;
+  return candidate;
+}
+
+function extractTmuxTarget(text: string): string | null {
+  const patterns = [
+    /tmux\s+attach(?:-session)?\s+-t\s+([A-Za-z0-9:_-]+)/i,
+    /tmux\s+capture-pane\s+-pt\s+([A-Za-z0-9:_-]+)/i,
+    /attach\s+-t\s+([A-Za-z0-9:_-]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return sanitizeTmuxTarget(match[1]);
+    }
+  }
+
+  return null;
+}
+
+function isTmuxMonitorRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (!lower.includes("tmux")) return false;
+
+  return (
+    lower.includes("monitor") ||
+    lower.includes("watch") ||
+    lower.includes("stream") ||
+    text.includes("实时监测") ||
+    text.includes("实时监控") ||
+    text.includes("持续监控") ||
+    text.includes("有任何新的信息") ||
+    text.includes("推送")
+  );
+}
+
+function isTmuxStopRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("stop tmux") ||
+    lower.includes("停止tmux") ||
+    lower.includes("停止监控") ||
+    lower.includes("停止监测") ||
+    lower.includes("结束监控")
+  );
+}
+
+function tailText(text: string, maxLines: number): string {
+  const lines = text.split("\n");
+  return lines.slice(Math.max(0, lines.length - maxLines)).join("\n");
 }
 
 function newTaskId(): string {
@@ -212,6 +282,7 @@ function loadProjectPolicy(workspace: string, project: string): ProjectPolicy {
   };
   const file = projectPolicyPath(workspace, project);
   if (!fs.existsSync(file)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(defaults, null, 2), "utf-8");
     return defaults;
   }
@@ -241,10 +312,8 @@ function enqueueUserRequest(workspace: string, message: string) {
   fs.mkdirSync(path.dirname(tapePath), { recursive: true });
   fs.appendFileSync(tapePath, `\n[USER REQUEST]: ${message}\n`, "utf-8");
 
-  const q = readQ(workspace);
-  if (q === "HALT" || q === "q_0: SYSTEM_BOOTING") {
-    writeQ(workspace, "q_1: PROCESSING_USER_REQUEST");
-  }
+  // New user tasks must restart from a deterministic processing state.
+  writeQ(workspace, "q_1: PROCESSING_USER_REQUEST");
 }
 
 function spawnAgent(chatId: string, agentName: string): AgentProcess {
@@ -252,7 +321,7 @@ function spawnAgent(chatId: string, agentName: string): AgentProcess {
   ensureWorkspace(ws);
   const child = spawn("npx", ["tsx", "cli.ts"], {
     cwd: process.cwd(),
-    env: { ...process.env, TURINGCLAW_WORKSPACE: ws },
+    env: { ...process.env, TURINGCLAW_WORKSPACE: ws, TURING_WORKSPACE: ws },
     stdio: "pipe",
   });
 
@@ -264,6 +333,8 @@ function spawnAgent(chatId: string, agentName: string): AgentProcess {
     if (!text) return;
     ap.lastOutput.push(text);
     if (ap.lastOutput.length > 30) ap.lastOutput.shift();
+    const logPath = path.join(ap.workspace, ".agent_runtime.log");
+    fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${text}\n`, "utf-8");
   };
 
   child.stdout.on("data", recordOutput);
@@ -322,6 +393,40 @@ function loadSessions() {
   for (const [chatId, state] of Object.entries(data)) sessions.set(chatId, state);
 }
 
+function bootstrapTrackersFromSessions() {
+  for (const [chatId, session] of sessions.entries()) {
+    const names = [session.activeAgent || "alpha"];
+    for (const rawName of names) {
+      const agentName = normalizeAgentName(rawName || "alpha");
+      const workspace = workspaceFor(chatId, agentName);
+      ensureWorkspace(workspace);
+      const key = keyFor(chatId, agentName);
+      const tracker =
+        trackers.get(key) ||
+        ({
+          lastQ: readQ(workspace),
+          awaitingResult: false,
+          seenWorkingState: false,
+          lastQChangeAt: Date.now(),
+          lastNotifyAt: 0,
+          recoveryAttempts: 0,
+          queue: [],
+          history: [],
+        } satisfies AgentTracker);
+
+      const q = readQ(workspace);
+      tracker.lastQ = q;
+      tracker.lastQChangeAt = Date.now();
+      tracker.awaitingResult = false;
+      tracker.seenWorkingState = false;
+      tracker.currentTaskId = undefined;
+      tracker.currentTaskStartedAt = undefined;
+
+      trackers.set(key, tracker);
+    }
+  }
+}
+
 async function tgApi<T>(method: string, payload: Record<string, unknown>): Promise<T> {
   const res = await fetch(`${API_BASE}/${method}`, {
     method: "POST",
@@ -365,7 +470,7 @@ function readQ(workspace: string): string {
 }
 
 function isTerminalQ(q: string): boolean {
-  return q === "HALT" || q === "FATAL_DEBUG";
+  return q === "HALT" || q === "FATAL_DEBUG" || q.includes("[HALT]");
 }
 
 function isInvalidHeadPointer(workspace: string): boolean {
@@ -442,6 +547,30 @@ function updateTaskState(tracker: AgentTracker, id: string, state: TaskState) {
       t.updatedAt = Date.now();
     }
   }
+}
+
+function cancelRunningTask(chatId: string, agentName: string, reason: string): string | null {
+  const key = keyFor(chatId, agentName);
+  const tracker = trackers.get(key);
+  if (!tracker || !tracker.currentTaskId) return null;
+
+  const taskId = tracker.currentTaskId;
+  writeQ(workspaceFor(chatId, agentName), "FATAL_DEBUG");
+  tracker.awaitingResult = false;
+  tracker.seenWorkingState = false;
+  tracker.queue = [];
+  tracker.history.push({
+    id: taskId,
+    state: "cancelled",
+    project: "general",
+    text: `(auto-cancelled: ${reason})`,
+    createdAt: tracker.currentTaskStartedAt || Date.now(),
+    updatedAt: Date.now(),
+  });
+  tracker.currentTaskId = undefined;
+  tracker.currentTaskStartedAt = undefined;
+  trackers.set(key, tracker);
+  return taskId;
 }
 
 async function monitorAgentCompletion() {
@@ -649,6 +778,94 @@ async function runBash(raw: string): Promise<string> {
   }
 }
 
+async function captureTmuxPane(target: string): Promise<string> {
+  const cmd = `tmux capture-pane -pt ${target} -S -200`;
+  try {
+    const { stdout, stderr } = await execAsync(cmd, {
+      cwd: process.cwd(),
+      timeout: 8000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    const content = `${stdout}${stderr ? `\n[stderr]\n${stderr}` : ""}`.trim();
+    return content || "[NO_OUTPUT]";
+  } catch (error: any) {
+    const details = (error?.stderr || error?.stdout || error?.message || "tmux capture failed").toString().trim();
+    throw new Error(details || "tmux capture failed");
+  }
+}
+
+function stopTmuxWatcher(chatId: number | string): boolean {
+  const key = tmuxWatcherKey(chatId);
+  const watcher = tmuxWatchers.get(key);
+  if (!watcher) return false;
+  clearInterval(watcher.timer);
+  tmuxWatchers.delete(key);
+  return true;
+}
+
+async function startTmuxWatcher(chatId: number, target: string): Promise<void> {
+  stopTmuxWatcher(chatId);
+
+  const initialSnapshot = await captureTmuxPane(target);
+  await sendMessage(
+    chatId,
+    [
+      `tmux watcher started`,
+      `target=${target}`,
+      `poll=${TMUX_POLL_SECONDS}s`,
+      "",
+      "initial snapshot:",
+      tailText(initialSnapshot, 60),
+    ].join("\n").slice(0, OUTPUT_LIMIT)
+  );
+
+  const key = tmuxWatcherKey(chatId);
+  const watcher: TmuxWatcher = {
+    target,
+    timer: setInterval(() => {
+      void (async () => {
+        const live = tmuxWatchers.get(key);
+        if (!live) return;
+        if (live.busy) return;
+        live.busy = true;
+
+        try {
+          const snapshot = await captureTmuxPane(live.target);
+          if (snapshot !== live.lastSnapshot) {
+            live.lastSnapshot = snapshot;
+            live.errorCount = 0;
+            await sendMessage(
+              chatId,
+              [
+                `tmux update`,
+                `target=${live.target}`,
+                `at=${new Date().toISOString()}`,
+                "",
+                tailText(snapshot, 80),
+              ].join("\n").slice(0, OUTPUT_LIMIT)
+            );
+          }
+        } catch (error: any) {
+          live.errorCount += 1;
+          if (live.errorCount >= 3) {
+            stopTmuxWatcher(chatId);
+            await sendMessage(chatId, `tmux watcher stopped: ${error?.message || "capture failed"}`);
+          }
+        } finally {
+          live.busy = false;
+        }
+      })().catch(() => {
+        // no-op; loop is best-effort and self-healing.
+      });
+    }, Math.max(2, TMUX_POLL_SECONDS) * 1000),
+    lastSnapshot: initialSnapshot,
+    busy: false,
+    errorCount: 0,
+  };
+
+  tmuxWatchers.set(key, watcher);
+}
+
 async function describeHostDirectory(): Promise<string> {
   const cwd = process.cwd();
   try {
@@ -701,7 +918,9 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
         "/status - read .reg_q/.reg_d",
         "/where - show host current directory and listing preview",
         "/tape [n] - tail MAIN_TAPE.md (default 40 lines)",
+        "/tmuxstop - stop active tmux live watcher",
         "/bash <cmd> - run shell command (optional, disabled by default)",
+        "Natural-language tmux monitor: send 'tmux attach -t <pane>, 实时监测并推送变化'.",
         "Any non-command text is sent to the active agent as task input.",
       ].join("\n")
     );
@@ -891,6 +1110,12 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
     return;
   }
 
+  if (cmd === "/tmuxstop") {
+    const stopped = stopTmuxWatcher(msg.chat.id);
+    await sendMessage(msg.chat.id, stopped ? "tmux watcher stopped." : "no active tmux watcher.");
+    return;
+  }
+
   await sendMessage(msg.chat.id, "unknown command. use /help");
 }
 
@@ -918,8 +1143,25 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
     return;
   }
 
+  if (isTmuxStopRequest(text)) {
+    const stopped = stopTmuxWatcher(msg.chat.id);
+    await sendMessage(msg.chat.id, stopped ? "tmux watcher stopped." : "no active tmux watcher.");
+    return;
+  }
+
   const chatId = String(msg.chat.id);
   const session = getSession(chatId);
+
+  const monitorTarget = extractTmuxTarget(text);
+  if (monitorTarget && isTmuxMonitorRequest(text)) {
+    const cancelledTaskId = cancelRunningTask(chatId, session.activeAgent, "superseded by tmux live monitor");
+    await startTmuxWatcher(msg.chat.id, monitorTarget);
+    if (cancelledTaskId) {
+      await sendMessage(msg.chat.id, `cancelled previous agent task: ${cancelledTaskId}`);
+    }
+    return;
+  }
+
   const agent = getOrStartAgent(chatId, session.activeAgent);
   const key = keyFor(chatId, session.activeAgent);
   const tracker =
@@ -1013,6 +1255,7 @@ function saveOffset(offset: number) {
 async function pollLoop() {
   let offset = loadOffset();
   loadSessions();
+  bootstrapTrackersFromSessions();
 
   console.log("[telegram] arm online, polling updates...");
   while (true) {
