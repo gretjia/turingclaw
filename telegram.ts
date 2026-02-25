@@ -885,6 +885,23 @@ async function captureTmuxPane(target: string): Promise<string> {
   }
 }
 
+async function listTmuxTargets(): Promise<string> {
+  try {
+    const { stdout } = await execAsync(
+      "tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} pane_id=#{pane_id} active=#{pane_active} cmd=#{pane_current_command} title=#{pane_title}'",
+      {
+        cwd: process.cwd(),
+        timeout: 8000,
+        maxBuffer: 512 * 1024,
+      }
+    );
+    const out = stdout.trim();
+    return out || "(no tmux panes)";
+  } catch (error: any) {
+    return `tmux list failed: ${error?.message || "unknown error"}`;
+  }
+}
+
 function stopTmuxWatcher(chatId: number | string): boolean {
   const key = tmuxWatcherKey(chatId);
   const watcher = tmuxWatchers.get(key);
@@ -999,6 +1016,7 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
         "/status - read .reg_q/.reg_d",
         "/where - show host current directory and listing preview",
         "/tape [n] - tail MAIN_TAPE.md (default 40 lines)",
+        "/tmuxlist - list available tmux pane targets",
         "/tmuxstop - stop active tmux live watcher",
         "/bash <cmd> - run shell command (optional, disabled by default)",
         "Natural-language tmux monitor: send 'tmux attach -t <pane>, 实时监测并推送变化'.",
@@ -1194,6 +1212,12 @@ async function handleCommand(msg: TelegramMessage, rawText: string) {
   if (cmd === "/tmuxstop") {
     const stopped = stopTmuxWatcher(msg.chat.id);
     await sendMessage(msg.chat.id, stopped ? "tmux watcher stopped." : "no active tmux watcher.");
+    return;
+  }
+
+  if (cmd === "/tmuxlist") {
+    const targets = await listTmuxTargets();
+    await sendMessage(msg.chat.id, targets);
     return;
   }
 
