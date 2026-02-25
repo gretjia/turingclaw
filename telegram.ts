@@ -1227,25 +1227,33 @@ function activeTmuxTarget(chatId: number | string): string | null {
 }
 
 async function sendTmuxInput(target: string, payload: string, pressEnter: boolean): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const args = ["send-keys", "-t", target, payload];
-    if (pressEnter) args.push("C-m");
+  const runSendKeys = (args: string[]): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const child = spawn("tmux", args, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: "ignore",
+      });
 
-    const child = spawn("tmux", args, {
-      cwd: process.cwd(),
-      env: process.env,
-      stdio: "ignore",
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`tmux ${args.join(" ")} failed with code ${code ?? 1}`));
+      });
     });
 
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(new Error(`tmux send-keys failed with code ${code ?? 1}`));
-    });
-  });
+  if (payload.length > 0) {
+    // Use literal mode so payload text is not interpreted as tmux key names.
+    await runSendKeys(["send-keys", "-t", target, "-l", payload]);
+  }
+
+  if (pressEnter) {
+    // Send Enter as a separate key event to improve reliability in interactive panes.
+    await runSendKeys(["send-keys", "-t", target, "Enter"]);
+  }
 }
 
 function stopTmuxWatcher(chatId: number | string): boolean {
