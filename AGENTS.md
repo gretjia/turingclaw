@@ -23,3 +23,9 @@ If multiple docs disagree, follow `./.handover/ENTRYPOINT.md` unless the user gi
 - Update `.handover/AGENT_ENTRY.md` when architecture, runtime flags, or operational workflow changes.
 - Keep instructions concise and executable.
 - Never commit secrets, credentials, or machine-specific private notes.
+
+## Gemini Invocation Policy
+
+- For this repository, every Gemini CLI call must use:
+  `gemini -y --model gemini-3.1-pro-preview`
+- If you need extra arguments, append them after this fixed prefix.

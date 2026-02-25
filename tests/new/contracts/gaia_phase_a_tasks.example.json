@@ -1,0 +1,14 @@
+{
+  "meta": {
+    "note": "Copy to gaia_phase_a_tasks.json after generating from validation JSONL"
+  },
+  "tasks": [
+    {
+      "taskId": "example-001",
+      "level": 1,
+      "question": "What is 2 + 2?",
+      "finalAnswer": "4",
+      "fileName": ""
+    }
+  ]
+}

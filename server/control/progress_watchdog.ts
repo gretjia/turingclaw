@@ -89,5 +89,11 @@ export class ProgressWatchdog {
 
 export function watchdogRecoveryState(reason: WatchdogReason, fingerprint: string, previous: State): State {
   const previousHead = stateHead(previous);
-  return `[WATCHDOG_RECOVERY:${reason}] ${fingerprint}\n[PREV_Q] ${previousHead}`;
+  return [
+    `[WATCHDOG_RECOVERY:${reason}] ${fingerprint}`,
+    'You are stuck in repeated behavior.',
+    'Next action must differ from recent repeated pointer/state pattern.',
+    'Prioritize unfinished required artifacts before HALT.',
+    `[PREV_Q] ${previousHead}`,
+  ].join('\n');
 }

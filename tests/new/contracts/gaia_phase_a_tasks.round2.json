@@ -1,0 +1,215 @@
+{
+  "meta": {
+    "generatedAt": "2026-02-25T19:07:25.129Z",
+    "sourceJsonl": "workspace/benchmarks/gaia/input/validation.jsonl",
+    "seed": 20260225,
+    "targetPerLevel": {
+      "l1": 8,
+      "l2": 8,
+      "l3": 8
+    },
+    "allowedExtensions": [
+      "csv",
+      "html",
+      "json",
+      "pdf",
+      "txt"
+    ],
+    "requireAttachment": false,
+    "candidateCount": 132
+  },
+  "tasks": [
+    {
+      "taskId": "0383a3ee-47a7-41a4-b493-519bdefe0488",
+      "level": 1,
+      "question": "On the BBC Earth YouTube video of the Top 5 Silliest Animal Moments, what species of bird is featured?",
+      "finalAnswer": "Rockhopper penguin",
+      "fileName": "",
+      "sourceLine": 117
+    },
+    {
+      "taskId": "389793a7-ca17-4e82-81cb-2b3a2391b4b9",
+      "level": 1,
+      "question": "You are a telecommunications engineer who wants to build cell phone towers on a stretch of road. In the reference file is a layout of the road and nearby houses. Each dash, \"-\", is a marker indicating a mile. Each capital H indicates a house located next to a mile marker, appearing above or below the stretch of road. Each cell phone tower can cover houses located next to the road within a 4-mile radius. Find the minimum number of cell phone towers needed to cover all houses next to the road. Your answer should be a positive numerical integer value.",
+      "finalAnswer": "3",
+      "fileName": "389793a7-ca17-4e82-81cb-2b3a2391b4b9.txt",
+      "sourceLine": 78
+    },
+    {
+      "taskId": "4b6bb5f7-f634-410e-815d-e673ab7f8632",
+      "level": 1,
+      "question": "In Series 9, Episode 11 of Doctor Who, the Doctor is trapped inside an ever-shifting maze. What is this location called in the official script for the episode? Give the setting exactly as it appears in the first scene heading.",
+      "finalAnswer": "THE CASTLE",
+      "fileName": "",
+      "sourceLine": 23
+    },
+    {
+      "taskId": "5a0c1adf-205e-4841-a666-7c3ef95def9d",
+      "level": 1,
+      "question": "What is the first name of the only Malko Competition recipient from the 20th Century (after 1977) whose nationality on record is a country that no longer exists?",
+      "finalAnswer": "Claus",
+      "fileName": "",
+      "sourceLine": 159
+    },
+    {
+      "taskId": "8e867cd7-cff9-4e6c-867a-ff5ddc2550be",
+      "level": 1,
+      "question": "How many studio albums were published by Mercedes Sosa between 2000 and 2009 (included)? You can use the latest 2022 version of english wikipedia.",
+      "finalAnswer": "3",
+      "fileName": "",
+      "sourceLine": 7
+    },
+    {
+      "taskId": "9d191bce-651d-4746-be2d-7ef8ecadb9c2",
+      "level": 1,
+      "question": "Examine the video at https://www.youtube.com/watch?v=1htKBjuUWec.\n\nWhat does Teal'c say in response to the question \"Isn't that hot?\"",
+      "finalAnswer": "Extremely",
+      "fileName": "",
+      "sourceLine": 88
+    },
+    {
+      "taskId": "bda648d7-d618-4883-88f4-3466eabd860e",
+      "level": 1,
+      "question": "Where were the Vietnamese specimens described by Kuznetzov in Nedoshivina's 2010 paper eventually deposited? Just give me the city name without abbreviations.",
+      "finalAnswer": "Saint Petersburg",
+      "fileName": "",
+      "sourceLine": 153
+    },
+    {
+      "taskId": "e1fc63a2-da7a-432f-be78-7c4a95598703",
+      "level": 1,
+      "question": "If Eliud Kipchoge could maintain his record-making marathon pace indefinitely, how many thousand hours would it take him to run the distance between the Earth and the Moon its closest approach? Please use the minimum perigee value on the Wikipedia page for the Moon when carrying out your calculation. Round your result to the nearest 1000 hours and do not use any comma separators if necessary.",
+      "finalAnswer": "17",
+      "fileName": "",
+      "sourceLine": 5
+    },
+    {
+      "taskId": "0bb3b44a-ede5-4db5-a520-4e844b0079c5",
+      "level": 2,
+      "question": "Consider the following symbols: 𒐜  𒐐𒐚\n\nThis is a number written using the Mesopotamian/Babylonian number system and represented with Sumerian cuneiform. Convert this number into Arabic numerals as a decimal number.",
+      "finalAnswer": "536",
+      "fileName": "",
+      "sourceLine": 128
+    },
+    {
+      "taskId": "17b5a6a3-bc87-42e8-b0fb-6ab0781ef2cc",
+      "level": 2,
+      "question": "I’m researching species that became invasive after people who kept them as pets released them. There’s a certain species of fish that was popularized as a pet by being the main character of the movie Finding Nemo. According to the USGS, where was this fish found as a nonnative species, before the year 2020? I need the answer formatted as the five-digit zip codes of the places the species was found, separated by commas if there is more than one place.",
+      "finalAnswer": "34689",
+      "fileName": "",
+      "sourceLine": 2
+    },
+    {
+      "taskId": "2dfc4c37-fec1-4518-84a7-10095d30ad75",
+      "level": 2,
+      "question": "According to Box Office Mojo's 2020 Worldwide Box Office list, how many of the top 10 highest-grossing worldwide movies are also on the top 10 highest-grossing domestic movies? Your answer should be a numerical integer value.",
+      "finalAnswer": "6",
+      "fileName": "",
+      "sourceLine": 57
+    },
+    {
+      "taskId": "366e2f2b-8632-4ef2-81eb-bc3877489217",
+      "level": 2,
+      "question": "The attached file lists accommodations in the resort town of Seahorse Island. Based on the information in this file, which seems like the better available place to stay for a family that enjoys swimming and wants a full house?",
+      "finalAnswer": "Shelley's place",
+      "fileName": "366e2f2b-8632-4ef2-81eb-bc3877489217.pdf",
+      "sourceLine": 75
+    },
+    {
+      "taskId": "7619a514-5fa8-43ef-9143-83b66a43d7a4",
+      "level": 2,
+      "question": "According to github, when was Regression added to the oldest closed numpy.polynomial issue that has the Regression label in MM/DD/YY?",
+      "finalAnswer": "04/15/18",
+      "fileName": "",
+      "sourceLine": 9
+    },
+    {
+      "taskId": "c8b7e059-c60d-472e-ad64-3b04ae1166dc",
+      "level": 2,
+      "question": "The work referenced in footnote 397 of Federico Lauria's 2014 dissertation is also the source for the titles of two paintings in the Smithsonian American Art Museum's collection, as of August 2023. What is the absolute difference between the chapter numbers of the chapters that the titles of these two paintings quote?",
+      "finalAnswer": "8",
+      "fileName": "",
+      "sourceLine": 82
+    },
+    {
+      "taskId": "e2d69698-bc99-4e85-9880-67eaccd66e6c",
+      "level": 2,
+      "question": "As of August 2023, who is the only winner of the US version of Survivor to be born in the month of May?",
+      "finalAnswer": "Michele Fitzgerald",
+      "fileName": "",
+      "sourceLine": 136
+    },
+    {
+      "taskId": "f2feb6a4-363c-4c09-a804-0db564eafd68",
+      "level": 2,
+      "question": "I’m thinking about selling my home, so I want to learn more about how homes in my area sold recently. I live in Pearl City, Hawaii, which is on the island of Oahu. I know two homes near me that sold in 2022 were 2072 Akaikai Loop, and 2017 Komo Mai Drive. Find which of those homes sold for more in 2022, and tell me how much it sold for. Don’t put commas or decimal places in the answer.",
+      "finalAnswer": "900000",
+      "fileName": "",
+      "sourceLine": 99
+    },
+    {
+      "taskId": "0512426f-4d28-49f0-be77-06d05daec096",
+      "level": 3,
+      "question": "In the YouTube 360 VR video from March 2018 narrated by the voice actor of Lord of the Rings' Gollum, what number was mentioned by the narrator directly after dinosaurs were first shown in the video?",
+      "finalAnswer": "100000000",
+      "fileName": "",
+      "sourceLine": 160
+    },
+    {
+      "taskId": "0bdb7c40-671d-4ad1-9ce3-986b159c0ddc",
+      "level": 3,
+      "question": "In NASA's Astronomy Picture of the Day on 2006 January 21, two astronauts are visible, with one appearing much smaller than the other. As of August 2023, out of the astronauts in the NASA Astronaut Group that the smaller astronaut was a member of, which one spent the least time in space, and how many minutes did he spend in space, rounded to the nearest minute? Exclude any astronauts who did not spend any time in space. Give the last name of the astronaut, separated from the number of minutes by a semicolon.",
+      "finalAnswer": "White; 5876",
+      "fileName": "",
+      "sourceLine": 161
+    },
+    {
+      "taskId": "384d0dd8-e8a4-4cfe-963c-d37f256e7662",
+      "level": 3,
+      "question": "In the NCATS PubChem compound database for Food Additive Status classification, find the compound that has a molecular weight of 100 g/mol or less, 6 heavy atoms, 1 or fewer hydrogen bond acceptors, and a complexity between 10 and 15. Of the shared gene-chemical co-occurrences between its two possible enzyme transformations, what is the PubChem CID of the heaviest by molecular weight?",
+      "finalAnswer": "4192",
+      "fileName": "",
+      "sourceLine": 25
+    },
+    {
+      "taskId": "56db2318-640f-477a-a82f-bc93ad13e882",
+      "level": 3,
+      "question": "The following numbers function similarly to ISBN 13 numbers, however, their validation methods are slightly different. Rather than using alternate weights of 1 and 3, the checksum digit is calculated with an alternate weight of 1 and some other positive integer less than 10. Otherwise, the checksum digit is calculated as expected. Unfortunately, there is an error in the data. Two adjacent columns have been transposed. These errored columns do not involve the final column or one of the first three columns. Using this information, please provide all potential solutions with the unknown weight and the smaller index of the two errored columns (assume we start our indexing at 0 and ignore hyphens). Give your answer in the form x, y where x is the weight and y is the smaller index of the two transposed columns.\n\n978-354181391-9\n978-946669746-1\n978-398036139-6\n978-447656680-4\n978-279586664-7\n978-595073693-3\n978-976647652-6\n978-591178125-5\n978-728465924-5\n978-414825155-9",
+      "finalAnswer": "7, 9",
+      "fileName": "",
+      "sourceLine": 63
+    },
+    {
+      "taskId": "676e5e31-a554-4acc-9286-b60d90a92d26",
+      "level": 3,
+      "question": "In July 2, 1959 United States standards for grades of processed fruits, vegetables, and certain other products listed as dehydrated, consider the items in the \"dried and dehydrated section\" specifically marked as dehydrated along with any items in the Frozen/Chilled section that contain the whole name of the item, but not if they're marked Chilled. As of August 2023, what is the percentage (to the nearest percent) of those standards that have been superseded by a new version since the date given in the 1959 standards?",
+      "finalAnswer": "86",
+      "fileName": "",
+      "sourceLine": 11
+    },
+    {
+      "taskId": "983bba7c-c092-455f-b6c9-7857003d48fc",
+      "level": 3,
+      "question": "What animals that were mentioned in both Ilias Lagkouvardos's and Olga Tapia's papers on the alvei species of the genus named for Copenhagen outside the bibliographies were also present in the 2021 article cited on the alvei species' Wikipedia page about a multicenter, randomized, double-blind study?",
+      "finalAnswer": "mice",
+      "fileName": "",
+      "sourceLine": 32
+    },
+    {
+      "taskId": "de9887f5-ead8-4727-876f-5a4078f8598c",
+      "level": 3,
+      "question": "What integer-rounded percentage of the total length of the harlequin shrimp recorded in Omar Valencfia-Mendez 2017 paper was the sea star fed to the same type of shrimp in G. Curt Fiedler's 2002 paper?",
+      "finalAnswer": "22",
+      "fileName": "",
+      "sourceLine": 28
+    },
+    {
+      "taskId": "e961a717-6b25-4175-8a68-874d28190ee4",
+      "level": 3,
+      "question": "According to wikipedia, how many Asian countries still have a monarchy and access to the sea in 2021?",
+      "finalAnswer": "12",
+      "fileName": "",
+      "sourceLine": 92
+    }
+  ]
+}

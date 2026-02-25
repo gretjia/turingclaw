@@ -43,6 +43,34 @@ function composeStatelessPrompt(discipline: string, q: State, s: Slice, d: Point
   ].join('\n');
 }
 
+function buildRecoverySystemHints(state: State): string[] {
+  const hints: string[] = [];
+
+  if (state.includes('[HALT_REJECTED]')) {
+    hints.push(
+      'Recovery mode: previous HALT was rejected. Satisfy missing artifacts first, especially non-empty ANSWER.txt.',
+    );
+  }
+
+  if (state.includes('[PRE_HALT_REVIEW_REQUIRED]')) {
+    hints.push(
+      'Recovery mode: perform explicit pre-halt verification against MAIN_TAPE requirements before attempting HALT again.',
+    );
+  }
+
+  if (state.includes('[POINTER_RECOVERY]') || state.includes('[TRAP:INVALID_POINTER]')) {
+    hints.push(
+      'Recovery mode: emit only valid pointers (HALT, sys://error_recovery, ./..., /..., http(s)://..., $ ..., tty://...).',
+    );
+  }
+
+  if (state.includes('[CYCLE_RECOVERY]') || state.includes('[WATCHDOG_RECOVERY:')) {
+    hints.push('Recovery mode: do not repeat recent pointer path; choose a different action that advances completion.');
+  }
+
+  return hints;
+}
+
 function toTransition(value: unknown): Transition {
   if (!value || typeof value !== 'object') {
     throw new Error('Oracle output is not an object');
@@ -215,6 +243,7 @@ export class StatelessOracle implements IOracle {
 
   public async collapse(discipline: string, q: State, s: Slice, d: Pointer = './MAIN_TAPE.md'): Promise<Transition> {
     const prompt = composeStatelessPrompt(discipline, q, s, d);
+    const recoveryHints = buildRecoverySystemHints(q);
     let lastError: Error | null = null;
     const attempts = 3;
 
@@ -236,6 +265,7 @@ export class StatelessOracle implements IOracle {
             content:
               'You are a stateless transition function. Produce the next transition only via the emit_transition function call.',
           },
+          ...recoveryHints.map((hint) => ({ role: 'system' as const, content: hint })),
           ...(retryNotice ? [{ role: 'system', content: retryNotice }] : []),
           { role: 'user', content: prompt },
         ],

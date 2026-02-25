@@ -185,6 +185,13 @@ function parseRepeats(args: string[]): number {
   return parsed;
 }
 
+function parseScenarioFilter(args: string[]): string | null {
+  const index = args.findIndex((arg) => arg === '--scenario');
+  if (index < 0) return null;
+  const value = (args[index + 1] ?? '').trim();
+  return value.length > 0 ? value : null;
+}
+
 function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
@@ -449,7 +456,7 @@ function parseScenarioContract(sourcePath: string, raw: string): Scenario {
   };
 }
 
-async function loadScenarioContracts(): Promise<Scenario[]> {
+async function loadScenarioContracts(scenarioFilter: string | null = null): Promise<Scenario[]> {
   const entries = await readdir(CONTRACT_DIR);
   const files = entries.filter((name) => name.endsWith('.json')).sort();
   if (files.length === 0) {
@@ -470,7 +477,15 @@ async function loadScenarioContracts(): Promise<Scenario[]> {
     scenarios.push(parsed);
   }
 
-  return scenarios;
+  if (!scenarioFilter) {
+    return scenarios;
+  }
+
+  const filtered = scenarios.filter((scenario) => scenario.id === scenarioFilter);
+  if (filtered.length === 0) {
+    throw new Error(`scenario not found: ${scenarioFilter}`);
+  }
+  return filtered;
 }
 
 async function runChecks(workspace: string, checks: Expectation[]): Promise<CheckResult[]> {
@@ -820,6 +835,7 @@ function summarize(report: BenchmarkReport): string {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const repeats = parseRepeats(args);
+  const scenarioFilter = parseScenarioFilter(args);
   const freezeBaseline = hasFlag(args, '--freeze-baseline');
   const gateEnabled = hasFlag(args, '--gate');
   const runStamp = nowStamp();
@@ -828,7 +844,7 @@ async function main(): Promise<void> {
   await mkdir(OUT_DIR, { recursive: true });
 
   const discipline = await loadDisciplineFromFile(PROMPT_FILE);
-  const scenarios = await loadScenarioContracts();
+  const scenarios = await loadScenarioContracts(scenarioFilter);
 
   const runs: ScenarioResult[] = [];
   for (let repeat = 1; repeat <= repeats; repeat += 1) {

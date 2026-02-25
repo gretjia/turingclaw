@@ -1,0 +1,66 @@
+{
+  "id": "home1_parity_sim",
+  "maxTicks": 120,
+  "initialQ": "q_0: SYSTEM_BOOTING",
+  "initialD": "./MAIN_TAPE.md",
+  "mainTape": "# 模拟运行\n\n## 任务目标\n已创建路径 `./$home1`（注意目录名包含字符 `$`），其下含若干子目录和 `*.md` 数字文件。\n你的任务是判断所有数字之和是奇数还是偶数。\n\n只需输出 odd/even，不需要输出总和。\n\n每个目录均包含隐藏文件 `.ls`，其内容等价于该目录的 `ls` 结果。\n\n## 关键规则\n- 所有输入输出用 md 文本。\n- 你是无历史图灵机，`q` 是唯一全局状态。\n- `q` 里维护 todo-stack，用 `[]` 与 `[x]` 标记并持续更新。\n- `q` 不存大数据；数据写文件。\n- 如不改当前文件，令 `s_prime=👆🏻`。\n- `s_prime` 写入当前指针 `d_t`，不是 `d_next`。\n\n## 强制完成条件\n1) 遍历并利用 `./$home1/**/.ls` 定位所有数字 md 文件。\n2) 使用 `./$home1/parity.md` 保存奇偶中间态（推荐 0/1）。\n3) 在 `./$home1/result.md` 写入最终结果，且内容必须是小写 `odd` 或 `even`。\n4) 完成后设置 `q_next=HALT` 且 `d_next=HALT`。",
+  "setupFiles": [
+    {
+      "path": "$home1/.ls",
+      "content": ".\n..\n.ls\n1\n2\n3\n4\n32342323.md\n"
+    },
+    {
+      "path": "$home1/32342323.md",
+      "content": "32342323\n"
+    },
+    {
+      "path": "$home1/1/.ls",
+      "content": ".\n..\n.ls\n12312432.md\na\nb\n"
+    },
+    {
+      "path": "$home1/1/12312432.md",
+      "content": "12312432\n"
+    },
+    {
+      "path": "$home1/1/a/.ls",
+      "content": ".\n..\n.ls\n23563425.md\n"
+    },
+    {
+      "path": "$home1/1/a/23563425.md",
+      "content": "23563425\n"
+    },
+    {
+      "path": "$home1/1/b/.ls",
+      "content": ".\n..\n.ls\n"
+    },
+    {
+      "path": "$home1/2/.ls",
+      "content": ".\n..\n.ls\n"
+    },
+    {
+      "path": "$home1/3/.ls",
+      "content": ".\n..\n.ls\n135246547.md\n"
+    },
+    {
+      "path": "$home1/3/135246547.md",
+      "content": "135246547\n"
+    },
+    {
+      "path": "$home1/4/.ls",
+      "content": ".\n..\n.ls\n"
+    }
+  ],
+  "checks": [
+    {
+      "kind": "text",
+      "path": "$home1/result.md",
+      "exact": "odd"
+    }
+  ],
+  "completion": {
+    "requireHalt": true,
+    "requireNoAnomalies": true,
+    "requireAllChecks": true,
+    "requirePostCheck": false
+  }
+}
