@@ -190,11 +190,40 @@ function extractTmuxInputPayload(text: string): { payload: string; pressEnter: b
   return { payload, pressEnter: !noEnter };
 }
 
+function extractImplicitReplyPayload(text: string): { payload: string; pressEnter: boolean } | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith("/")) return null;
+
+  const replyPrefixed = trimmed.match(/^(?:请)?(?:帮我|替我)?回复\s*[:：]\s*(.+)$/i);
+  if (replyPrefixed?.[1]) {
+    const payload = replyPrefixed[1].trim();
+    if (payload) return { payload, pressEnter: true };
+  }
+
+  const sendPrefixed = trimmed.match(/^(?:请)?(?:帮我|替我)?发送\s*[:：]\s*(.+)$/i);
+  if (sendPrefixed?.[1]) {
+    const payload = sendPrefixed[1].trim();
+    if (payload) return { payload, pressEnter: true };
+  }
+
+  const shortIntent = /^(同意|不同意|拒绝|可以|不可以|好的|收到|明白|继续|暂停|完成|ok|yes|no|done)$/i;
+  if (trimmed.length <= 24 && shortIntent.test(trimmed)) {
+    return { payload: trimmed, pressEnter: true };
+  }
+
+  return null;
+}
+
 function isTmuxInputRequest(text: string): boolean {
   const lower = text.toLowerCase();
   if (!lower.includes("tmux")) return false;
   if (!hasTmuxInputVerb(text)) return false;
   return extractTmuxInputPayload(text) !== null;
+}
+
+function isImplicitTmuxInputRequest(text: string): boolean {
+  if (hasTmuxInputVerb(text)) return true;
+  return extractImplicitReplyPayload(text) !== null;
 }
 
 function isTmuxMonitorRequest(text: string): boolean {
@@ -1485,11 +1514,17 @@ async function handleTextMessage(msg: TelegramMessage, text: string) {
 
   const chatId = String(msg.chat.id);
   const session = getSession(chatId);
+  const explicitTarget = extractTmuxTarget(text);
+  const watchedTarget = activeTmuxTarget(msg.chat.id);
+  const explicitParsed = extractTmuxInputPayload(text);
+  const implicitParsed = extractImplicitReplyPayload(text);
+  const shouldRouteTmuxInput =
+    isTmuxInputRequest(text) ||
+    (Boolean(watchedTarget) && isImplicitTmuxInputRequest(text));
 
-  if (isTmuxInputRequest(text)) {
-    const explicitTarget = extractTmuxTarget(text);
-    const target = explicitTarget ?? activeTmuxTarget(msg.chat.id);
-    const parsed = extractTmuxInputPayload(text);
+  if (shouldRouteTmuxInput) {
+    const target = explicitTarget ?? watchedTarget;
+    const parsed = explicitParsed ?? implicitParsed;
 
     if (!target || !parsed) {
       await sendMessage(
