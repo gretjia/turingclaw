@@ -158,6 +158,9 @@ function isTmuxMonitorRequest(text: string): boolean {
   const lower = text.toLowerCase();
   if (!lower.includes("tmux")) return false;
 
+  if (/\btmux\s+attach(?:-session)?\s+-t\b/i.test(text)) return true;
+  if (/\btmux\s+capture-pane\s+-pt\b/i.test(text)) return true;
+
   return (
     lower.includes("monitor") ||
     lower.includes("watch") ||
