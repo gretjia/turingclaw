@@ -578,13 +578,20 @@ async function monitorAgentCompletion() {
     const { chatId, agentName } = parseKey(key);
     const session = getSession(chatId);
     const activeProject = sanitizeProjectName(session.activeProject || "general");
-    const policy = loadProjectPolicy(workspaceFor(chatId, agentName), activeProject);
-    const agent = getOrStartAgent(chatId, agentName);
-    const currentQ = readQ(agent.workspace);
+    const workspace = workspaceFor(chatId, agentName);
+    ensureWorkspace(workspace);
+    const policy = loadProjectPolicy(workspace, activeProject);
+    const currentQ = readQ(workspace);
     const now = Date.now();
+    let cachedAgent: AgentProcess | null = null;
+    const agent = (): AgentProcess => {
+      if (!cachedAgent) cachedAgent = getOrStartAgent(chatId, agentName);
+      return cachedAgent;
+    };
 
     // Start next queued task if idle.
     if (!tracker.awaitingResult && tracker.queue.length > 0) {
+      const activeAgent = agent();
       const next = tracker.queue.shift()!;
       tracker.currentTaskId = next.id;
       tracker.currentTaskStartedAt = now;
@@ -592,13 +599,13 @@ async function monitorAgentCompletion() {
       tracker.seenWorkingState = false;
       tracker.recoveryAttempts = 0;
       tracker.lastNotifyAt = 0;
-      tracker.lastQ = readQ(agent.workspace);
+      tracker.lastQ = readQ(activeAgent.workspace);
       tracker.lastQChangeAt = now;
       next.state = "running";
       next.updatedAt = now;
-      enqueueUserRequest(agent.workspace, next.text);
+      enqueueUserRequest(activeAgent.workspace, next.text);
       appendProjectNotebook(
-        agent.workspace,
+        activeAgent.workspace,
         next.project,
         "Task Start",
         `task_id=${next.id}\nstate=running\nagent=${agentName}`
@@ -621,25 +628,27 @@ async function monitorAgentCompletion() {
     }
     if (!tracker.seenWorkingState) continue;
 
+    const activeAgent = agent();
+
     if (isTerminalQ(currentQ)) {
       const taskId = tracker.currentTaskId || "unknown";
       const terminalState: TaskState = currentQ === "HALT" ? "halt" : "fatal";
-      const summary = buildCompletionSummary(agent, currentQ);
-      if (currentQ === "HALT" && !hasExecutionEvidence(agent)) {
+      const summary = buildCompletionSummary(activeAgent, currentQ);
+      if (currentQ === "HALT" && !hasExecutionEvidence(activeAgent)) {
         // Evidence gate: do not accept empty HALT.
         tracker.recoveryAttempts += 1;
         updateTaskState(tracker, taskId, "recovering");
         appendSystemRecoveryNote(
-          agent.workspace,
+          activeAgent.workspace,
           `halt reached without evidence; require explicit verification output (attempt ${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}).`
         );
-        writeQ(agent.workspace, "q_1: PROCESSING_USER_REQUEST");
+        writeQ(activeAgent.workspace, "q_1: PROCESSING_USER_REQUEST");
         await sendMessage(
           Number(chatId),
           `task recovering\ntask_id=${taskId}\nreason=evidence gate failed\nattempt=${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}`
         );
         if (tracker.recoveryAttempts > policy.maxRecoveryAttempts) {
-          const msg = buildFailureTemplate(agent, taskId, "timeout", "evidence gate exceeded");
+          const msg = buildFailureTemplate(activeAgent, taskId, "timeout", "evidence gate exceeded");
           updateTaskState(tracker, taskId, "timeout");
           tracker.history.push({
             id: taskId,
@@ -658,7 +667,7 @@ async function monitorAgentCompletion() {
         continue;
       }
       appendProjectNotebook(
-        agent.workspace,
+        activeAgent.workspace,
         activeProject,
         "Outcome",
         `task_id=${taskId}\nagent=${agentName}\nq=${currentQ}\n\n${summary}`
@@ -686,8 +695,8 @@ async function monitorAgentCompletion() {
     if (tracker.currentTaskStartedAt && now - tracker.currentTaskStartedAt > hardTimeoutMs) {
       const taskId = tracker.currentTaskId || "unknown";
       updateTaskState(tracker, taskId, "timeout");
-      const msg = buildFailureTemplate(agent, taskId, "timeout", "hard timeout reached");
-      appendProjectNotebook(agent.workspace, activeProject, "Timeout", `task_id=${taskId}\nq=${currentQ}`);
+      const msg = buildFailureTemplate(activeAgent, taskId, "timeout", "hard timeout reached");
+      appendProjectNotebook(activeAgent.workspace, activeProject, "Timeout", `task_id=${taskId}\nq=${currentQ}`);
       await sendMessage(Number(chatId), msg);
       tracker.awaitingResult = false;
       tracker.seenWorkingState = false;
@@ -703,7 +712,7 @@ async function monitorAgentCompletion() {
       const taskId = tracker.currentTaskId || "unknown";
       await sendMessage(
         Number(chatId),
-        `task running\ntask_id=${taskId}\nagent=${agentName}\nq=${currentQ}\nworkspace=${agent.workspace}\n(no need to check tape manually)`
+        `task running\ntask_id=${taskId}\nagent=${agentName}\nq=${currentQ}\nworkspace=${activeAgent.workspace}\n(no need to check tape manually)`
       );
       tracker.lastNotifyAt = now;
     }
@@ -716,7 +725,7 @@ async function monitorAgentCompletion() {
     if (tracker.recoveryAttempts >= policy.maxRecoveryAttempts) {
       const taskId = tracker.currentTaskId || "unknown";
       updateTaskState(tracker, taskId, "timeout");
-      const msg = buildFailureTemplate(agent, taskId, "timeout", "recovery attempts exceeded");
+      const msg = buildFailureTemplate(activeAgent, taskId, "timeout", "recovery attempts exceeded");
       await sendMessage(Number(chatId), msg);
       tracker.awaitingResult = false;
       tracker.seenWorkingState = false;
@@ -733,30 +742,29 @@ async function monitorAgentCompletion() {
     const taskId = tracker.currentTaskId || "unknown";
     updateTaskState(tracker, taskId, "recovering");
 
-    if (isInvalidHeadPointer(agent.workspace)) {
-      writeD(agent.workspace, "MAIN_TAPE.md");
-      writeQ(agent.workspace, "q_1: PROCESSING_USER_REQUEST");
+    if (isInvalidHeadPointer(activeAgent.workspace)) {
+      writeD(activeAgent.workspace, "MAIN_TAPE.md");
+      writeQ(activeAgent.workspace, "q_1: PROCESSING_USER_REQUEST");
       appendSystemRecoveryNote(
-        agent.workspace,
+        activeAgent.workspace,
         `head pointer was invalid; reset d to MAIN_TAPE.md (attempt ${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}).`
       );
     } else {
       appendSystemRecoveryNote(
-        agent.workspace,
+        activeAgent.workspace,
         `state stagnation detected; enforce alternate strategy and tool retries (attempt ${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}).`
       );
     }
 
-    getOrStartAgent(chatId, agentName);
     await sendMessage(
       Number(chatId),
-      `task recovering\ntask_id=${taskId}\nagent=${agentName}\nq=${readQ(agent.workspace)}\nattempt=${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}`
+      `task recovering\ntask_id=${taskId}\nagent=${agentName}\nq=${readQ(activeAgent.workspace)}\nattempt=${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}`
     );
     appendProjectNotebook(
-      agent.workspace,
+      activeAgent.workspace,
       activeProject,
       "Recovery",
-      `task_id=${taskId}\nauto-recovery attempt ${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}\nq=${readQ(agent.workspace)}`
+      `task_id=${taskId}\nauto-recovery attempt ${tracker.recoveryAttempts}/${policy.maxRecoveryAttempts}\nq=${readQ(activeAgent.workspace)}`
     );
     trackers.set(key, tracker);
   }
